@@ -1,0 +1,17 @@
+{
+  description = "Moonlight Web — browser Moonlight client (Rust bridge + Svelte UI)";
+
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+  outputs = { self, nixpkgs }:
+    let
+      systems = [ "x86_64-linux" "aarch64-linux" ];
+      forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+    in
+    {
+      # Single source of truth lives in shell.nix (also usable via plain `nix-shell`).
+      devShells = forAll (pkgs: {
+        default = import ./shell.nix { inherit pkgs; };
+      });
+    };
+}

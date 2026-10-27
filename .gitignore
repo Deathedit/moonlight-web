@@ -1,0 +1,6 @@
+/target
+/data
+.direnv/
+node_modules/
+web/dist/
+*.log
