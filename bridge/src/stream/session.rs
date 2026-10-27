@@ -52,6 +52,7 @@ impl Streams {
         host: Host,
         server_cert: String,
         ice_servers: &[String],
+        udp_port: u16,
         mut req: StreamRequest,
     ) -> anyhow::Result<(String, VideoCodec)> {
         let mut active = self.0.lock().await;
@@ -77,7 +78,7 @@ impl Streams {
         tracing::info!(codec = video.codec.label(), "negotiated video codec");
 
         let offer = std::mem::take(&mut req.offer_sdp);
-        let (peer, answer, peer_events) = Peer::answer(offer, &video, ice_servers).await?;
+        let (peer, answer, peer_events) = Peer::answer(offer, &video, ice_servers, udp_port).await?;
         let stop = Arc::new(Notify::new());
         let done =
             tokio::spawn(run(nv, host, server_cert, req, video.codec, Arc::new(peer), peer_events, stop.clone()));
@@ -120,7 +121,7 @@ async fn run(
     // 1. Wait for the browser's control channel. Input channels open alongside it; keep
     //    them until the host connection is up.
     let mut input_channels = Vec::new();
-    let control = tokio::time::timeout(CONTROL_TIMEOUT, async {
+    let wait_for_control = tokio::time::timeout(CONTROL_TIMEOUT, async {
         while let Some(ev) = peer_events.recv().await {
             if let PeerEvent::DataChannel(dc) = ev {
                 match dc.label().await.as_deref() {
@@ -132,9 +133,13 @@ async fn run(
             }
         }
         None
-    })
-    .await;
-    let Ok(Some(control)) = control else {
+    });
+    // A newer session may replace this one before the browser even connects.
+    let control = tokio::select! {
+        res = wait_for_control => res.ok().flatten(),
+        _ = stop.notified() => None,
+    };
+    let Some(control) = control else {
         tracing::warn!("browser never opened the control channel");
         peer.close().await;
         return;

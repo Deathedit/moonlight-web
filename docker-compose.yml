@@ -1,0 +1,23 @@
+services:
+  moonlight-web:
+    # Published by .github/workflows/docker.yml.
+    image: ghcr.io/deathedit/moonlight-web:latest
+    # Or build locally from this checkout (cloned with --recursive):
+    # build: .
+    container_name: moonlight-web
+    # Required: WebRTC must advertise the server's real LAN address to the browser,
+    # and mDNS host discovery needs the LAN multicast. Bridge networking breaks both.
+    network_mode: host
+    environment:
+      MLW_BIND: 0.0.0.0:8080
+      # WebRTC media port. Open TCP 8080 and UDP 8080 in the server's firewall.
+      MLW_WEBRTC_UDP_PORT: "8080"
+      # Only needed when streaming across networks (not on a LAN):
+      # MLW_ICE_SERVERS: stun:stun.l.google.com:19302
+    volumes:
+      - moonlight-data:/data
+    restart: unless-stopped
+
+volumes:
+  # Holds the bridge's identity and pairings: keep it, or you'll need to pair again.
+  moonlight-data:

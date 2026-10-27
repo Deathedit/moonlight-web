@@ -46,6 +46,29 @@ direnv allow           # auto-enter via .envrc
 | `MLW_DATA_DIR`    | `data`         | Hosts, client certificate, pairing data   |
 | `MLW_WEB_DIR`     | `web/dist`     | Built UI                                  |
 | `MLW_ICE_SERVERS` | _(none)_       | Comma-separated STUN/TURN URLs (non-LAN)  |
+| `MLW_WEBRTC_UDP_PORT` | `0` (random) | Fixed UDP port for WebRTC media (firewalls) |
+
+## Self-hosting with Docker
+
+Every push to `main` builds `ghcr.io/deathedit/moonlight-web` via GitHub Actions
+(`.github/workflows/docker.yml`; tags `latest`, `sha-…`, and `X.Y.Z` for `vX.Y.Z` tags).
+
+```sh
+docker compose up -d        # uses docker-compose.yml
+```
+
+- **Host networking is required** (`network_mode: host`): WebRTC has to advertise the server's
+  real LAN address, and mDNS discovery needs LAN multicast.
+- **Firewall on the server:** allow TCP 8080 (web UI/API), UDP 8080 (WebRTC media, set by
+  `MLW_WEBRTC_UDP_PORT`) and UDP 5353 (mDNS discovery).
+- **Pairings live in the `/data` volume.** Keep it; losing it means pairing again.
+- **No authentication.** Anyone who can reach the bridge can stream from and control your PC.
+  Keep it on your LAN or behind a reverse proxy with authentication; don't expose it to the internet.
+- **Use HTTPS when opening it from another machine.** Browsers only allow some features
+  (gamepads, keyboard lock in fullscreen) in secure contexts — `https://` or `localhost`.
+  Put it behind a reverse proxy with TLS (Caddy, Traefik, nginx); WebSocket support isn't needed.
+
+Build the image yourself with `docker build -t moonlight-web .` from a `--recursive` clone.
 
 ## Host discovery
 

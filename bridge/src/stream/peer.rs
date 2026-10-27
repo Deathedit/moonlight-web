@@ -140,6 +140,7 @@ impl Peer {
         offer_sdp: String,
         video: &OfferedCodec,
         ice_servers: &[String],
+        udp_port: u16,
     ) -> anyhow::Result<(Self, String, mpsc::UnboundedReceiver<PeerEvent>)> {
         let mut media = MediaEngine::default();
         media.register_codec(
@@ -170,7 +171,7 @@ impl Peer {
             .with_media_engine(media)
             .with_interceptor_registry(registry)
             .with_handler(Arc::new(Handler { gathered: gathered_tx, events: events_tx }))
-            .with_udp_addrs(vec!["0.0.0.0:0".to_string()])
+            .with_udp_addrs(vec![format!("0.0.0.0:{udp_port}")])
             .build()
             .await?;
         let pc: Arc<dyn PeerConnection> = Arc::new(pc);

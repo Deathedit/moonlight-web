@@ -11,6 +11,9 @@ pub struct Config {
     pub web_dir: PathBuf,
     /// Optional STUN/TURN servers for non-LAN use; empty = host candidates only.
     pub ice_servers: Vec<String>,
+    /// Fixed UDP port for WebRTC media (0 = random). Only one stream runs at a time,
+    /// so one port is enough; fixing it lets a firewall allow it.
+    pub webrtc_udp_port: u16,
 }
 
 impl Config {
@@ -28,6 +31,11 @@ impl Config {
             .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
             .unwrap_or_default();
 
-        Ok(Self { bind, data_dir, web_dir, ice_servers })
+        let webrtc_udp_port = match std::env::var("MLW_WEBRTC_UDP_PORT") {
+            Ok(p) => p.parse().map_err(|_| anyhow::anyhow!("MLW_WEBRTC_UDP_PORT must be a port number"))?,
+            Err(_) => 0,
+        };
+
+        Ok(Self { bind, data_dir, web_dir, ice_servers, webrtc_udp_port })
     }
 }
