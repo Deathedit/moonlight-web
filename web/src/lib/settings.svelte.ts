@@ -1,6 +1,9 @@
 // Stream settings, persisted per-browser in localStorage.
 
-export type Codec = 'h264' | 'h265' | 'av1';
+import type { VideoCodec } from './stream/codecs';
+
+/** "auto" picks the best codec this browser decodes in hardware and the host encodes. */
+export type Codec = 'auto' | VideoCodec;
 export type MouseMode = 'relative' | 'absolute';
 
 export interface StreamSettings {
@@ -26,7 +29,7 @@ export const defaults: StreamSettings = {
   nativeFps: false,
   fps: 60,
   bitrateKbps: 20_000,
-  codec: 'h264',
+  codec: 'auto',
   mouseMode: 'relative',
   showStats: false,
 };
@@ -56,17 +59,6 @@ $effect.root(() => {
 
 export function resetSettings() {
   Object.assign(settings, defaults);
-}
-
-/** Codecs the browser can actually receive over WebRTC. */
-export function supportedCodecs(): Codec[] {
-  const caps = RTCRtpReceiver.getCapabilities?.('video')?.codecs ?? [];
-  const mimes = new Set(caps.map((c) => c.mimeType.toLowerCase()));
-  const out: Codec[] = [];
-  if (mimes.has('video/h264')) out.push('h264');
-  if (mimes.has('video/h265')) out.push('h265');
-  if (mimes.has('video/av1')) out.push('av1');
-  return out;
 }
 
 // ---- Native display detection ----

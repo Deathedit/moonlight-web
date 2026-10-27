@@ -6,6 +6,7 @@
 
 import { ApiError } from '../api';
 import { resolveStreamMode, type StreamSettings } from '../settings.svelte';
+import { applyCodecPreferences, probeCodecs, rankForAuto, type VideoCodec } from './codecs';
 import type { InputChannels } from './input';
 
 export type ControlMessage =
@@ -54,8 +55,14 @@ export class StreamSession {
     settings: StreamSettings,
     handlers: SessionHandlers,
   ): Promise<StreamSession> {
+    const mode = await resolveStreamMode(settings);
+    const codecs: VideoCodec[] =
+      settings.codec === 'auto'
+        ? rankForAuto(await probeCodecs({ ...mode, bitrateKbps: settings.bitrateKbps }))
+        : [settings.codec];
+
     const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
-    preferH264(pc.addTransceiver('video', { direction: 'recvonly' }));
+    applyCodecPreferences(pc.addTransceiver('video', { direction: 'recvonly' }), codecs);
     pc.addTransceiver('audio', { direction: 'recvonly' });
 
     const control = pc.createDataChannel('control', { ordered: true });
@@ -94,7 +101,6 @@ export class StreamSession {
       await pc.setLocalDescription(await pc.createOffer());
       await waitForIceGathering(pc);
 
-      const mode = await resolveStreamMode(settings);
       const res = await fetch(`/api/hosts/${encodeURIComponent(hostId)}/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -102,6 +108,7 @@ export class StreamSession {
           appId,
           ...mode,
           bitrateKbps: settings.bitrateKbps,
+          codecs,
           sdp: pc.localDescription!.sdp,
         }),
       });
@@ -169,19 +176,6 @@ export class StreamSession {
       codec: codecs.get(inbound.codecId)?.mimeType?.replace('video/', '') ?? '?',
     };
   }
-}
-
-/** Put H.264 (packetization-mode=1) first so it's what gets negotiated. */
-function preferH264(transceiver: RTCRtpTransceiver) {
-  const caps = RTCRtpReceiver.getCapabilities?.('video')?.codecs;
-  if (!caps || !transceiver.setCodecPreferences) return;
-  const h264 = caps.filter((c) => c.mimeType.toLowerCase() === 'video/h264');
-  if (h264.length === 0) return;
-  const mode1 = (c: RTCRtpCodec) => (c.sdpFmtpLine ?? '').includes('packetization-mode=1');
-  h264.sort((a, b) => Number(mode1(b)) - Number(mode1(a)));
-  // Keep RTX/RED/FEC entries so retransmissions still work.
-  const extras = caps.filter((c) => /rtx|red|ulpfec|flexfec/i.test(c.mimeType));
-  transceiver.setCodecPreferences([...h264, ...extras]);
 }
 
 function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {

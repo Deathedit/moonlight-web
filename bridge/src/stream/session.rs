@@ -11,6 +11,7 @@ use webrtc::{
 };
 
 use super::{
+    codec::{self, VideoCodec},
     connection::{AudioFrame, Connection, ConnectionParams, StreamEvent, VideoFrame, AUDIO_QUEUE, VIDEO_QUEUE},
     input,
     peer::{Peer, PeerEvent},
@@ -25,6 +26,8 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct StreamRequest {
     pub app_id: u32,
+    /// Browser's codec preference, best first.
+    pub codecs: Vec<VideoCodec>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -50,7 +53,7 @@ impl Streams {
         server_cert: String,
         ice_servers: &[String],
         mut req: StreamRequest,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, VideoCodec)> {
         let mut active = self.0.lock().await;
         if let Some(old) = active.take() {
             tracing::info!("replacing the active stream");
@@ -58,12 +61,28 @@ impl Streams {
             let _ = old.done.await;
         }
 
+        // Pick the codec before answering: the answer can only carry one.
+        let info = nv.server_info_https(&host.endpoint(), &server_cert).await?;
+        let offered = codec::offered_video_codecs(&req.offer_sdp);
+        let video = codec::choose(&req.codecs, &offered, info.codec_mode_support).ok_or_else(|| {
+            let want: Vec<_> = req.codecs.iter().map(|c| c.label()).collect();
+            anyhow::anyhow!(
+                "no common video codec: you asked for {}, but {} can't encode {} or this browser can't decode {}",
+                want.join("/"),
+                host.name,
+                if want.len() == 1 { "it" } else { "them" },
+                if want.len() == 1 { "it" } else { "them" },
+            )
+        })?;
+        tracing::info!(codec = video.codec.label(), "negotiated video codec");
+
         let offer = std::mem::take(&mut req.offer_sdp);
-        let (peer, answer, peer_events) = Peer::answer(offer, ice_servers).await?;
+        let (peer, answer, peer_events) = Peer::answer(offer, &video, ice_servers).await?;
         let stop = Arc::new(Notify::new());
-        let done = tokio::spawn(run(nv, host, server_cert, req, Arc::new(peer), peer_events, stop.clone()));
+        let done =
+            tokio::spawn(run(nv, host, server_cert, req, video.codec, Arc::new(peer), peer_events, stop.clone()));
         *active = Some(Active { stop, done });
-        Ok(answer)
+        Ok((answer, video.codec))
     }
 }
 
@@ -85,11 +104,13 @@ async fn send(control: &Arc<dyn DataChannel>, msg: ControlOut<'_>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     nv: NvClient,
     host: Host,
     server_cert: String,
     req: StreamRequest,
+    video_codec: VideoCodec,
     peer: Arc<Peer>,
     mut peer_events: mpsc::UnboundedReceiver<PeerEvent>,
     stop: Arc<Notify>,
@@ -142,6 +163,7 @@ async fn run(
         &host,
         &server_cert,
         &req,
+        video_codec,
         &peer,
         &mut peer_events,
         input_channels,
@@ -172,6 +194,7 @@ async fn stream(
     host: &Host,
     server_cert: &str,
     req: &StreamRequest,
+    video_codec: VideoCodec,
     peer: &Arc<Peer>,
     peer_events: &mut mpsc::UnboundedReceiver<PeerEvent>,
     input_channels: Vec<Arc<dyn DataChannel>>,
@@ -224,7 +247,7 @@ async fn stream(
         height: req.height,
         fps: req.fps,
         bitrate_kbps: req.bitrate_kbps,
-        video_formats: moonlight_common_sys::VIDEO_FORMAT_H264 as i32,
+        video_formats: video_codec.video_format(),
         audio_configuration,
         ri_key,
         ri_iv,

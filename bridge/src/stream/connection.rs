@@ -281,8 +281,9 @@ extern "C" fn on_connection_status(status: c_int) {
 
 extern "C" fn on_video_setup(format: c_int, width: c_int, height: c_int, fps: c_int, _ctx: *mut std::ffi::c_void, _flags: c_int) -> c_int {
     tracing::info!(format = format!("{format:#x}"), width, height, fps, "video stream configured");
-    // Only H.264 is forwarded for now (we only advertise it, but be defensive).
-    if format & ml::VIDEO_FORMAT_MASK_H264 as c_int == 0 {
+    // We advertise exactly one 8-bit 4:2:0 format, so anything else is unexpected.
+    let supported = (ml::VIDEO_FORMAT_H264 | ml::VIDEO_FORMAT_H265 | ml::VIDEO_FORMAT_AV1_MAIN8) as c_int;
+    if format & supported == 0 {
         tracing::error!("host chose an unsupported video format {format:#x}");
         return -1;
     }

@@ -6,9 +6,8 @@
     recommendedBitrateKbps,
     resetSettings,
     settings,
-    supportedCodecs,
-    type Codec,
   } from '../lib/settings.svelte';
+  import { CODEC_LABELS, probeCodecs, rankForAuto, type CodecSupport, type VideoCodec } from '../lib/stream/codecs';
 
   const presets = [
     { label: '720p', w: 1280, h: 720 },
@@ -17,8 +16,6 @@
     { label: '4K', w: 3840, h: 2160 },
   ];
   const fpsPresets = [30, 60, 120, 144, 165];
-  const codecLabels: Record<Codec, string> = { h264: 'H.264', h265: 'HEVC (H.265)', av1: 'AV1' };
-  const available = supportedCodecs();
 
   let native = $state(nativeResolution());
   let nativeHz = $state<number | null>(null);
@@ -81,9 +78,32 @@
   const recommended = $derived(recommendedBitrateKbps(effective.width, effective.height, effective.fps));
   const mbps = (kbps: number) => (kbps / 1000).toFixed(kbps % 1000 === 0 ? 0 : 1);
 
+  // Decoder support depends on resolution/frame rate, so re-probe when they change.
+  let support = $state<CodecSupport[] | null>(null);
+  $effect(() => {
+    const mode = { ...effective, bitrateKbps: settings.bitrateKbps };
+    let stale = false;
+    const t = setTimeout(() => probeCodecs(mode).then((s) => !stale && (support = s)), 150);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+    };
+  });
+  const autoPick = $derived<VideoCodec | null>(support ? (rankForAuto(support)[0] ?? null) : null);
+  const effectiveCodec = $derived(settings.codec === 'auto' ? autoPick : settings.codec);
+
+  function describe(c: VideoCodec): string {
+    const s = support?.find((x) => x.codec === c);
+    if (!s) return '';
+    if (!s.supported) return ' — not supported by this browser';
+    if (s.hardware === true) return ' — hardware decode';
+    if (s.hardware === false) return ' — software decode';
+    return '';
+  }
+
   // H.264 tops out at level 5.2 in most hardware decoders: ~2 million macroblocks/s.
   const h264Heavy = $derived(
-    settings.codec === 'h264' && (Math.ceil(effective.width / 16) * Math.ceil(effective.height / 16) * effective.fps) > 2_073_600,
+    effectiveCodec === 'h264' && (Math.ceil(effective.width / 16) * Math.ceil(effective.height / 16) * effective.fps) > 2_073_600,
   );
 
   const clampInt = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v || lo)));
@@ -182,16 +202,20 @@
     <div class="field">
       <label class="label" for="codec">Codec</label>
       <select id="codec" class="select" bind:value={settings.codec}>
-        {#each Object.entries(codecLabels) as [value, label] (value)}
-          <option {value} disabled={!available.includes(value as Codec)}>
-            {label}{available.includes(value as Codec) ? '' : ' — not supported by this browser'}
+        <option value="auto">Auto{autoPick ? ` — ${CODEC_LABELS[autoPick]}${describe(autoPick)}` : ''}</option>
+        {#each Object.entries(CODEC_LABELS) as [value, label] (value)}
+          <option {value} disabled={support?.find((s) => s.codec === value)?.supported === false}>
+            {label}{describe(value as VideoCodec)}
           </option>
         {/each}
       </select>
+      <p class="hint">
+        Auto prefers codecs your GPU decodes in hardware, and falls back to whatever the host can encode.
+      </p>
       {#if h264Heavy}
         <p class="hint warn">
-          This exceeds what most H.264 hardware decoders handle (level 5.2). If the stream stutters or fails, lower the
-          frame rate or resolution — HEVC/AV1 support is coming.
+          This exceeds what most H.264 hardware decoders handle (level 5.2). If the stream stutters, pick HEVC or AV1
+          if available, or lower the frame rate.
         </p>
       {/if}
     </div>

@@ -11,10 +11,7 @@ use bytes::Bytes;
 use rtc::{
     interceptor::{Attribute, Interceptor, Packet, Slot, StreamInfo, TaggedPacket},
     media::Sample,
-    peer_connection::{
-        configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS},
-        transport::RTCDtlsRole,
-    },
+    peer_connection::{configuration::media_engine::MIME_TYPE_OPUS, transport::RTCDtlsRole},
     rtcp::payload_feedbacks::{full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication},
     rtp_transceiver::rtp_sender::{
         RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
@@ -22,6 +19,8 @@ use rtc::{
     sansio::Protocol,
 };
 use tokio::sync::mpsc;
+
+use super::codec::OfferedCodec;
 use webrtc::{
     data_channel::DataChannel,
     media_stream::{
@@ -37,18 +36,6 @@ use webrtc::{
 
 /// How long to wait for our ICE candidates before answering anyway.
 const GATHER_TIMEOUT: Duration = Duration::from_secs(3);
-
-fn h264_codec() -> RTCRtpCodec {
-    RTCRtpCodec {
-        mime_type: MIME_TYPE_H264.to_owned(),
-        clock_rate: 90_000,
-        channels: 0,
-        // Constrained baseline is what every browser offers; decoders accept the host's
-        // High-profile stream regardless, the fmtp only has to match for negotiation.
-        sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_owned(),
-        rtcp_feedback: vec![],
-    }
-}
 
 fn opus_codec() -> RTCRtpCodec {
     RTCRtpCodec {
@@ -146,14 +133,17 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// Answer the browser's offer. Returns the peer, its answer SDP and the event stream.
+    /// Answer the browser's offer with `video` (one of the codecs it offered, with its
+    /// exact payload type and fmtp, so negotiation can't mismatch). Returns the peer, its
+    /// answer SDP and the event stream.
     pub async fn answer(
         offer_sdp: String,
+        video: &OfferedCodec,
         ice_servers: &[String],
     ) -> anyhow::Result<(Self, String, mpsc::UnboundedReceiver<PeerEvent>)> {
         let mut media = MediaEngine::default();
         media.register_codec(
-            RTCRtpCodecParameters { rtp_codec: h264_codec(), payload_type: 102 },
+            RTCRtpCodecParameters { rtp_codec: video.rtp_codec(), payload_type: video.payload_type },
             RtpCodecKind::Video,
         )?;
         media.register_codec(RTCRtpCodecParameters { rtp_codec: opus_codec(), payload_type: 111 }, RtpCodecKind::Audio)?;
@@ -186,7 +176,8 @@ impl Peer {
         let pc: Arc<dyn PeerConnection> = Arc::new(pc);
 
         let result = async {
-            let (video, video_ssrc, video_sender) = add_track(&pc, RtpCodecKind::Video, "video", h264_codec()).await?;
+            let (video_track, video_ssrc, video_sender) =
+                add_track(&pc, RtpCodecKind::Video, "video", video.rtp_codec()).await?;
             let (audio, audio_ssrc, audio_sender) = add_track(&pc, RtpCodecKind::Audio, "audio", opus_codec()).await?;
 
             pc.set_remote_description(RTCSessionDescription::offer(offer_sdp)?).await?;
@@ -194,9 +185,10 @@ impl Peer {
             pc.set_local_description(answer).await?;
             let _ = tokio::time::timeout(GATHER_TIMEOUT, gathered_rx.recv()).await;
 
-            let video_pt =
-                negotiated_pt(&video_sender).await.ok_or_else(|| anyhow::anyhow!("browser didn't accept H.264 video"))?;
-            let video = OutTrack { track: video, ssrc: video_ssrc, pt: video_pt };
+            let video_pt = negotiated_pt(&video_sender)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("browser didn't accept {} video", video.codec.label()))?;
+            let video = OutTrack { track: video_track, ssrc: video_ssrc, pt: video_pt };
             let audio = negotiated_pt(&audio_sender).await.map(|pt| OutTrack { track: audio, ssrc: audio_ssrc, pt });
             if audio.is_none() {
                 tracing::warn!("browser didn't negotiate Opus audio; streaming video only");

@@ -15,7 +15,10 @@ use crate::{
     hosts::{parse_address, Host, HostStore},
     nvhttp::{NvClient, NvError, ServerInfo, DEFAULT_HTTPS_PORT},
     pairing::{self, PairSession, PairSessions, PairState},
-    stream::session::{StreamRequest, Streams},
+    stream::{
+        codec::VideoCodec,
+        session::{StreamRequest, Streams},
+    },
 };
 
 #[derive(Clone)]
@@ -342,13 +345,22 @@ struct StartStream {
     height: u32,
     fps: u32,
     bitrate_kbps: u32,
+    /// Video codecs the browser wants, best first; defaults to H.264 only.
+    #[serde(default = "default_codecs")]
+    codecs: Vec<VideoCodec>,
     /// The browser's WebRTC offer (non-trickle).
     sdp: String,
+}
+
+fn default_codecs() -> Vec<VideoCodec> {
+    vec![VideoCodec::H264]
 }
 
 #[derive(Serialize)]
 struct StreamAnswer {
     sdp: String,
+    /// The codec the bridge picked.
+    codec: VideoCodec,
 }
 
 /// Answer the browser's offer; the session (launch + connect) continues in the background
@@ -370,7 +382,10 @@ async fn start_stream(
     }
 
     let (host, cert) = paired_host(&s, &id).await?;
-    let sdp = s
+    if req.codecs.is_empty() {
+        return Err(bad("no video codecs requested"));
+    }
+    let (sdp, codec) = s
         .streams
         .start(
             s.nv.clone(),
@@ -379,6 +394,7 @@ async fn start_stream(
             &s.config.ice_servers,
             StreamRequest {
                 app_id: req.app_id,
+                codecs: req.codecs,
                 width: req.width,
                 height: req.height,
                 fps: req.fps,
@@ -388,5 +404,5 @@ async fn start_stream(
         )
         .await
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("WebRTC setup failed: {e:#}")))?;
-    Ok(Json(StreamAnswer { sdp }))
+    Ok(Json(StreamAnswer { sdp, codec }))
 }
