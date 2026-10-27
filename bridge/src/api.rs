@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     boxart::{self, BoxArtCache},
     config::Config,
+    discovery::Discovery,
     hosts::{parse_address, Host, HostStore},
     nvhttp::{NvClient, NvError, ServerInfo, DEFAULT_HTTPS_PORT},
     pairing::{self, PairSession, PairSessions, PairState},
@@ -29,14 +30,17 @@ pub struct AppState {
     pub pairing: PairSessions,
     pub boxart: Arc<BoxArtCache>,
     pub streams: Streams,
+    pub discovery: Discovery,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/hosts", get(list_hosts).post(add_host))
+        .route("/discover", get(discover))
         .route("/hosts/{id}", get(get_host).delete(delete_host))
         .route("/hosts/{id}/pair", get(pair_status).post(start_pair).delete(cancel_pair))
+        .route("/hosts/{id}/unpair", post(unpair_host))
         .route("/hosts/{id}/apps", get(list_apps))
         .route("/hosts/{id}/apps/{app_id}/art", get(app_art))
         .route("/hosts/{id}/quit", post(quit_app))
@@ -72,6 +76,23 @@ type ApiResult<T> = Result<Json<T>, ApiError>;
 
 fn not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "unknown host".into())
+}
+
+/// Turn a host error into something a user can act on.
+fn host_error(host: &Host, what: &str, e: NvError) -> ApiError {
+    if e.is_pairing_rejected() {
+        return ApiError(
+            StatusCode::CONFLICT,
+            format!("{} no longer accepts this bridge (it was unpaired on the host). Pair again from the Hosts page.", host.name),
+        );
+    }
+    match e {
+        NvError::Unreachable(_) => ApiError(
+            StatusCode::BAD_GATEWAY,
+            format!("couldn't reach {} at {} — is it on and is Sunshine running?", host.name, host.address),
+        ),
+        other => ApiError(StatusCode::BAD_GATEWAY, format!("{what}: {other}")),
+    }
 }
 
 #[derive(Serialize)]
@@ -297,7 +318,7 @@ async fn list_apps(State(s): State<AppState>, Path(id): Path<String>) -> ApiResu
     let (host, cert) = paired_host(&s, &id).await?;
     let ep = host.endpoint();
     let (apps, info) = tokio::join!(s.nv.app_list(&ep, &cert), s.nv.server_info_https(&ep, &cert));
-    let apps = apps.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("couldn't load apps: {e}")))?;
+    let apps = apps.map_err(|e| host_error(&host, "couldn't load apps", e))?;
     let current = info.map_or(0, |i| i.current_game);
     Ok(Json(
         apps.into_iter()
@@ -311,7 +332,7 @@ async fn app_art(State(s): State<AppState>, Path((id, app_id)): Path<(String, u3
         Some(data) => data,
         None => {
             let (host, cert) = paired_host(&s, &id).await?;
-            let data = s.nv.app_asset(&host.endpoint(), &cert, app_id).await?;
+            let data = s.nv.app_asset(&host.endpoint(), &cert, app_id).await.map_err(|e| host_error(&host, "box art", e))?;
             if let Err(e) = s.boxart.put(&id, app_id, &data).await {
                 tracing::warn!("couldn't cache box art: {e}");
             }
@@ -330,7 +351,7 @@ async fn app_art(State(s): State<AppState>, Path((id, app_id)): Path<(String, u3
 
 async fn quit_app(State(s): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     let (host, cert) = paired_host(&s, &id).await?;
-    s.nv.cancel(&host.endpoint(), &cert).await?;
+    s.nv.cancel(&host.endpoint(), &cert).await.map_err(|e| host_error(&host, "couldn't quit the app", e))?;
     tracing::info!(host = %host.name, "quit running app");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -405,4 +426,45 @@ async fn start_stream(
         .await
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("WebRTC setup failed: {e:#}")))?;
     Ok(Json(StreamAnswer { sdp, codec }))
+}
+
+// ---- Discovery & unpairing ----
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveredHost {
+    name: String,
+    address: String,
+    port: u16,
+    /// Set when this host is already in the host list.
+    known_id: Option<String>,
+}
+
+/// Hosts advertising on the LAN that answer serverinfo, flagged if already added.
+async fn discover(State(s): State<AppState>) -> ApiResult<Vec<DiscoveredHost>> {
+    let known = s.hosts.list().await;
+    let probes = s.discovery.list().into_iter().map(|adv| {
+        let nv = s.nv.clone();
+        let known = &known;
+        async move {
+            let address = adv.address.to_string();
+            let info = nv.server_info(&address, adv.port).await.ok()?;
+            Some(DiscoveredHost {
+                name: if info.hostname.is_empty() { adv.name } else { info.hostname.clone() },
+                known_id: known.iter().find(|h| h.id == info.unique_id).map(|h| h.id.clone()),
+                address,
+                port: adv.port,
+            })
+        }
+    });
+    Ok(Json(futures::future::join_all(probes).await.into_iter().flatten().collect()))
+}
+
+/// Forget the pairing on both sides (best effort on the host).
+async fn unpair_host(State(s): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    let host = s.hosts.get(&id).await.ok_or_else(not_found)?;
+    s.nv.unpair(&host.endpoint()).await;
+    s.hosts.set_server_cert(&id, None).await?;
+    tracing::info!(host = %host.name, "unpaired");
+    Ok(StatusCode::NO_CONTENT)
 }

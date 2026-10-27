@@ -34,6 +34,20 @@ pub enum NvError {
     Tls(String),
 }
 
+impl NvError {
+    /// The host refused our TLS client certificate: it no longer considers us paired.
+    pub fn is_pairing_rejected(&self) -> bool {
+        match self {
+            Self::Unreachable(e) => {
+                let chain = error_chain(e).to_lowercase();
+                chain.contains("alert") || chain.contains("certificate")
+            }
+            Self::Status { code: 401, .. } => true,
+            _ => false,
+        }
+    }
+}
+
 /// reqwest's Display stops at "error sending request for url (...)"; append the causes
 /// (connection reset, TLS failure, ...) and shorten the URL to its path — the query
 /// carries kilobytes of hex-encoded pairing material.

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type Host } from '../lib/api';
+  import { api, type DiscoveredHost, type Host } from '../lib/api';
   import HostCard from '../lib/components/HostCard.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import Modal from '../lib/components/Modal.svelte';
@@ -11,6 +11,10 @@
 
   let hosts = $state<Host[] | null>(null);
   let loadError = $state<string | null>(null);
+  let discovered = $state<DiscoveredHost[] | null>(null);
+  let addingFound = $state<string | null>(null);
+
+  const newFound = $derived((discovered ?? []).filter((d) => !d.knownId));
 
   let addOpen = $state(false);
   let address = $state('');
@@ -26,6 +30,25 @@
       loadError = null;
     } catch (e) {
       loadError = (e as Error).message;
+    }
+    // Discovery is best-effort; failures just mean nothing extra to show.
+    api.discover().then(
+      (d) => (discovered = d),
+      () => (discovered = []),
+    );
+  }
+
+  async function addFound(d: DiscoveredHost) {
+    addingFound = d.address;
+    try {
+      const host = await api.addHost(`${d.address}:${d.port}`);
+      hosts = [...(hosts ?? []).filter((h) => h.id !== host.id), host];
+      discovered = (discovered ?? []).map((x) => (x.address === d.address ? { ...x, knownId: host.id } : x));
+      openHost(host); // straight into pairing
+    } catch (e) {
+      loadError = (e as Error).message;
+    } finally {
+      addingFound = null;
     }
   }
 
@@ -71,6 +94,26 @@
     }
   }
 
+  let unpairing = $state<Host | null>(null);
+  let unpairOpen = $state(false);
+
+  function askUnpair(host: Host) {
+    unpairing = host;
+    unpairOpen = true;
+  }
+
+  async function confirmUnpair() {
+    if (!unpairing) return;
+    const id = unpairing.id;
+    unpairOpen = false;
+    try {
+      await api.unpair(id);
+    } catch (e) {
+      loadError = (e as Error).message;
+    }
+    await refresh();
+  }
+
   function askRemove(host: Host) {
     removing = host;
     removeOpen = true;
@@ -98,6 +141,26 @@
     <div class="banner"><Icon name="alert" size={16} /> {loadError}</div>
   {/if}
 
+  {#if newFound.length > 0}
+    <div class="found">
+      <h2>Found on your network</h2>
+      <div class="found-list">
+        {#each newFound as d (d.address)}
+          <div class="found-item card">
+            <span class="found-icon"><Icon name="monitor" size={18} /></span>
+            <div class="found-meta">
+              <b>{d.name}</b>
+              <span>{d.address}</span>
+            </div>
+            <button class="btn btn-primary" onclick={() => addFound(d)} disabled={addingFound !== null}>
+              {addingFound === d.address ? 'Adding…' : 'Add & pair'}
+            </button>
+          </div>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
   {#if hosts === null}
     <div class="grid">
       {#each [0, 1, 2] as i (i)}<div class="card skeleton"></div>{/each}
@@ -115,9 +178,16 @@
   {:else}
     <div class="grid">
       {#each hosts as host (host.id)}
-        <HostCard {host} onopen={openHost} onremove={askRemove} />
+        <HostCard {host} onopen={openHost} onremove={askRemove} onunpair={askUnpair} />
       {/each}
     </div>
+  {/if}
+
+  {#if discovered !== null && discovered.length === 0}
+    <p class="discover-hint">
+      PCs running Sunshine are found automatically via mDNS. If yours doesn't show up, allow mDNS (UDP port 5353)
+      through the firewall on the machine running this bridge, or add it by address.
+    </p>
   {/if}
 </section>
 
@@ -147,6 +217,16 @@
 </Modal>
 
 <PairDialog host={pairing} bind:open={pairOpen} onpaired={goToApps} />
+
+<Modal bind:open={unpairOpen} title="Unpair host?">
+  <p class="confirm">
+    <b>{unpairing?.name}</b> will forget this bridge. You can pair again any time with a new PIN.
+  </p>
+  {#snippet footer()}
+    <button class="btn" onclick={() => (unpairOpen = false)}>Cancel</button>
+    <button class="btn btn-danger" onclick={confirmUnpair}><Icon name="lock" size={15} /> Unpair</button>
+  {/snippet}
+</Modal>
 
 <Modal bind:open={removeOpen} title="Remove host?">
   <p class="confirm">
@@ -220,6 +300,67 @@
     max-width: 440px;
     margin: 8px 0 20px;
     color: var(--muted);
+  }
+
+  .found {
+    margin-bottom: 28px;
+  }
+  .found h2 {
+    margin-bottom: 12px;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .found-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+  }
+  .found-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 14px;
+    border-color: rgba(79, 140, 255, 0.35);
+    animation: found-in 250ms ease;
+  }
+  @keyframes found-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  .found-icon {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .found-meta {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .found-meta b {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .found-meta span {
+    color: var(--faint);
+    font-size: 13px;
+  }
+  .discover-hint {
+    margin: 28px 0 0;
+    color: var(--faint);
+    font-size: 13px;
   }
 
   .hint {

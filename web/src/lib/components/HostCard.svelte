@@ -6,7 +6,13 @@
     host,
     onopen,
     onremove,
-  }: { host: Host; onopen: (host: Host) => void; onremove: (host: Host) => void } = $props();
+    onunpair,
+  }: {
+    host: Host;
+    onopen: (host: Host) => void;
+    onremove: (host: Host) => void;
+    onunpair: (host: Host) => void;
+  } = $props();
 
   let menuOpen = $state(false);
 
@@ -51,6 +57,11 @@
     >
     {#if menuOpen}
       <div class="menu" role="menu">
+        {#if host.paired}
+          <button role="menuitem" onclick={() => onunpair(host)}>
+            <Icon name="lock" size={15} /> Unpair
+          </button>
+        {/if}
         <button role="menuitem" class="danger" onclick={() => onremove(host)}>
           <Icon name="trash" size={15} /> Remove host
         </button>

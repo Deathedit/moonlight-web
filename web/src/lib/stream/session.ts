@@ -13,8 +13,8 @@ export type ControlMessage =
   | { type: 'stage'; stage: string }
   | { type: 'started'; width: number; height: number; fps: number }
   | { type: 'status'; poor: boolean }
-  | { type: 'failed'; error: string }
-  | { type: 'ended'; reason: string | null }
+  | { type: 'failed'; error: string; retryable: boolean }
+  | { type: 'ended'; reason: string | null; retryable: boolean }
   | { type: 'rumble'; controller: number; low: number; high: number };
 
 export interface SessionHandlers {

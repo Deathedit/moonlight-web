@@ -1,6 +1,7 @@
 mod api;
 mod boxart;
 mod config;
+mod discovery;
 mod hosts;
 mod identity;
 mod nvhttp;
@@ -33,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
         pairing: Default::default(),
         boxart: Arc::new(boxart::BoxArtCache::new(&config.data_dir)),
         streams: Default::default(),
+        discovery: discovery::Discovery::start(),
     };
 
     // SPA: unknown paths fall back to index.html so client-side routes work on reload.

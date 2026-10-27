@@ -47,6 +47,17 @@ direnv allow           # auto-enter via .envrc
 | `MLW_WEB_DIR`     | `web/dist`     | Built UI                                  |
 | `MLW_ICE_SERVERS` | _(none)_       | Comma-separated STUN/TURN URLs (non-LAN)  |
 
+## Host discovery
+
+PCs running Sunshine are found automatically via mDNS (`_nvstream._tcp`). The machine running
+the bridge must accept mDNS replies (UDP 5353). On NixOS, for example:
+
+```nix
+networking.firewall.allowedUDPPorts = [ 5353 ];
+```
+
+Hosts can always be added by IP address instead.
+
 ## Layout
 
 - `bridge/` — axum server, GameStream HTTP API, pairing, WebRTC sessions, input

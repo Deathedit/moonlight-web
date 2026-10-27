@@ -47,6 +47,14 @@ export interface Host {
   appVersion: string | null;
 }
 
+export interface DiscoveredHost {
+  name: string;
+  address: string;
+  port: number;
+  /** Set when already in the host list. */
+  knownId: string | null;
+}
+
 export interface App {
   id: number;
   title: string;
@@ -71,6 +79,8 @@ export const api = {
   startPair: (id: string) => request<PairState>('POST', `/hosts/${enc(id)}/pair`),
   pairStatus: (id: string) => request<PairState>('GET', `/hosts/${enc(id)}/pair`),
   cancelPair: (id: string) => request<void>('DELETE', `/hosts/${enc(id)}/pair`),
+  unpair: (id: string) => request<void>('POST', `/hosts/${enc(id)}/unpair`),
+  discover: () => request<DiscoveredHost[]>('GET', '/discover'),
   listApps: (id: string) => request<App[]>('GET', `/hosts/${enc(id)}/apps`),
   quitApp: (id: string) => request<void>('POST', `/hosts/${enc(id)}/quit`),
   artUrl: (id: string, appId: number) => `/api/hosts/${enc(id)}/apps/${appId}/art`,

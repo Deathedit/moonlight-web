@@ -92,8 +92,10 @@ enum ControlOut<'a> {
     Stage { stage: &'a str },
     Started { width: u32, height: u32, fps: u32 },
     Status { poor: bool },
-    Failed { error: &'a str },
-    Ended { reason: Option<&'a str> },
+    Failed { error: &'a str, retryable: bool },
+    /// `retryable`: the stream dropped for reasons a reconnect may fix (vs. the app
+    /// being closed, another tab taking over, ...).
+    Ended { reason: Option<&'a str>, retryable: bool },
     Rumble { controller: u16, low: u16, high: u16 },
 }
 
@@ -173,13 +175,13 @@ async fn run(
     )
     .await;
     match &outcome {
-        Ok(reason) => {
-            tracing::info!(host = %host.name, reason = reason.as_deref().unwrap_or("stopped"), "stream ended");
-            send(&control, ControlOut::Ended { reason: reason.as_deref() }).await;
+        Ok(end) => {
+            tracing::info!(host = %host.name, reason = end.reason.unwrap_or("stopped"), end.retryable, "stream ended");
+            send(&control, ControlOut::Ended { reason: end.reason, retryable: end.retryable }).await;
         }
         Err(e) => {
             tracing::warn!(host = %host.name, "stream failed: {e:#}");
-            send(&control, ControlOut::Failed { error: &format!("{e:#}") }).await;
+            send(&control, ControlOut::Failed { error: &format!("{e:#}"), retryable: false }).await;
         }
     }
     // Let the final message flush before tearing down the transport.
@@ -187,7 +189,18 @@ async fn run(
     peer.close().await;
 }
 
-/// Runs the stream until it ends. `Ok(reason)` for a normal end (reason shown to the user).
+/// How a stream that got going ended.
+struct End {
+    /// Shown to the user; None when the user ended it themselves.
+    reason: Option<&'static str>,
+    retryable: bool,
+}
+
+impl End {
+    const STOPPED: Self = Self { reason: None, retryable: false };
+}
+
+/// Runs the stream until it ends. `Err` only for failures while setting it up.
 #[allow(clippy::too_many_arguments)]
 async fn stream(
     nv: &NvClient,
@@ -201,7 +214,7 @@ async fn stream(
     control: &Arc<dyn DataChannel>,
     stop: &Notify,
     browser_stop: &Notify,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<End> {
     let ep = host.endpoint();
 
     send(control, ControlOut::Stage { stage: "Launching app" }).await;
@@ -297,10 +310,12 @@ async fn stream(
     let mut last_frame: Option<std::time::Instant> = None;
     // P-frames are useless to the browser until it has decoded a keyframe.
     let mut waiting_for_idr = true;
-    let reason = loop {
+    let end = loop {
         tokio::select! {
             frame = video_rx.recv() => {
-                let Some(frame) = frame else { break Some("Connection to the host closed.".to_string()) };
+                let Some(frame) = frame else {
+                    break End { reason: Some("The connection to the host closed."), retryable: true };
+                };
                 if waiting_for_idr && !frame.idr {
                     continue;
                 }
@@ -314,7 +329,7 @@ async fn stream(
                 }
             }
             Some(ev) = events_rx.recv() => match ev {
-                StreamEvent::Terminated { code } => break Some(termination_message(code).to_string()),
+                StreamEvent::Terminated { code } => break termination(code),
                 StreamEvent::ConnectionPoor(poor) => send(control, ControlOut::Status { poor }).await,
                 StreamEvent::Rumble { controller, low, high } => {
                     send(control, ControlOut::Rumble { controller, low, high }).await;
@@ -326,19 +341,21 @@ async fn stream(
                     waiting_for_idr = true;
                     Connection::request_idr();
                 }
-                PeerEvent::State(RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) => break None,
+                PeerEvent::State(RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) => break End::STOPPED,
                 PeerEvent::DataChannel(dc) if dc.label().await.is_ok_and(|l| l.starts_with("input")) => {
                     spawn_input_reader(dc);
                 }
                 _ => {}
             },
-            _ = browser_stop.notified() => break None,
-            _ = stop.notified() => break Some("Stream was opened in another tab.".to_string()),
+            _ = browser_stop.notified() => break End::STOPPED,
+            _ = stop.notified() => {
+                break End { reason: Some("The stream was opened in another tab."), retryable: false };
+            }
         }
     };
     audio_pump.abort();
     connection.stop().await;
-    Ok(reason)
+    Ok(end)
 }
 
 /// Decode input messages from one data channel and forward them to the host.
@@ -377,19 +394,37 @@ impl Drop for ConnectionGuard {
     }
 }
 
-fn termination_message(code: i32) -> &'static str {
+/// Map moonlight-common-c's termination code to a message and whether reconnecting helps.
+fn termination(code: i32) -> End {
     use moonlight_common_sys as ml;
     // bindgen types the 0-valued #define as u32 and the negative ones as i32.
     const GRACEFUL: i32 = ml::ML_ERROR_GRACEFUL_TERMINATION as i32;
-    match code {
-        GRACEFUL => "The app was closed on the host.",
-        ml::ML_ERROR_NO_VIDEO_TRAFFIC => {
-            "No video was received from the host. Check that UDP ports 47998-48000 aren't blocked by a firewall."
-        }
-        ml::ML_ERROR_NO_VIDEO_FRAME => "The host stopped sending video.",
-        ml::ML_ERROR_UNEXPECTED_EARLY_TERMINATION => "The host ended the stream unexpectedly.",
-        ml::ML_ERROR_PROTECTED_CONTENT => "The host is showing protected content that can't be streamed.",
-        ml::ML_ERROR_FRAME_CONVERSION => "The host failed to encode video.",
-        _ => "The connection to the host was lost.",
+    let (reason, retryable) = match code {
+        GRACEFUL => ("The app was closed on the host.", false),
+        // A firewall problem: retrying would just fail the same way.
+        ml::ML_ERROR_NO_VIDEO_TRAFFIC => (
+            "No video was received from the host. Check that UDP ports 47998-48000 aren't blocked by its firewall.",
+            false,
+        ),
+        ml::ML_ERROR_PROTECTED_CONTENT => ("The host is showing protected content that can't be streamed.", false),
+        ml::ML_ERROR_NO_VIDEO_FRAME => ("The host stopped sending video.", true),
+        ml::ML_ERROR_UNEXPECTED_EARLY_TERMINATION => ("The host ended the stream unexpectedly.", true),
+        ml::ML_ERROR_FRAME_CONVERSION => ("The host failed to encode video.", true),
+        _ => ("The connection to the host was lost.", true),
+    };
+    End { reason: Some(reason), retryable }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonlight_common_sys as ml;
+
+    #[test]
+    fn classifies_terminations() {
+        assert!(!termination(0).retryable, "app closed on host");
+        assert!(!termination(ml::ML_ERROR_NO_VIDEO_TRAFFIC).retryable, "firewall");
+        assert!(termination(ml::ML_ERROR_UNEXPECTED_EARLY_TERMINATION).retryable);
+        assert!(termination(-12345).retryable, "unknown codes: network loss");
     }
 }

@@ -12,6 +12,7 @@
 
   type Phase =
     | { kind: 'connecting'; stage: string }
+    | { kind: 'reconnecting'; attempt: number; reason: string }
     | { kind: 'streaming' }
     | { kind: 'error'; message: string }
     | { kind: 'ended'; message: string | null };
@@ -46,6 +47,7 @@
         break;
       case 'started':
         phase = { kind: 'streaming' };
+        attempts = 0;
         startInput();
         showHint = true;
         setTimeout(() => (showHint = false), 5000);
@@ -57,10 +59,12 @@
         pads?.rumble(msg.controller, msg.low, msg.high);
         break;
       case 'failed':
+        if (msg.retryable && retry(msg.error)) break;
         phase = { kind: 'error', message: msg.error };
         stopInput();
         break;
       case 'ended':
+        if (msg.retryable && retry(msg.reason ?? 'The connection was lost.')) break;
         phase = { kind: 'ended', message: msg.reason };
         stopInput();
         break;
@@ -119,6 +123,66 @@
     video.play().then(() => (soundBlocked = false), () => {});
   }
 
+  // ---- (Re)connecting ----
+
+  const MAX_RETRIES = 3;
+  let attempts = 0;
+  let unmounted = false;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Start a session. Each call gets its own handlers, so a stale session can't touch state. */
+  function connect() {
+    const id = Number(appId);
+    let current: StreamSession | null = null;
+    const isCurrent = () => !unmounted && session === current;
+
+    StreamSession.start(hostId, id, settings, {
+      onMessage: (msg) => isCurrent() && onControl(msg),
+      onMedia: (stream) => isCurrent() && attachMedia(stream),
+      onDisconnected: (reason) => {
+        if (!isCurrent() || phase.kind === 'ended') return;
+        if (!retry(reason)) {
+          phase = { kind: 'error', message: reason };
+          stopInput();
+        }
+      },
+    }).then(
+      (s) => {
+        if (unmounted) return s.stop();
+        current = s;
+        session = s;
+      },
+      (e) => {
+        if (unmounted) return;
+        const message = (e as Error).message;
+        // The bridge itself unreachable (fetch failed) is worth retrying; an explicit
+        // refusal (bad settings, unpaired...) is not.
+        if (!(e instanceof TypeError && retry(message))) phase = { kind: 'error', message };
+      },
+    );
+  }
+
+  /** Schedule a reconnect if attempts remain. Returns false when giving up. */
+  function retry(reason: string): boolean {
+    if (unmounted || attempts >= MAX_RETRIES) return false;
+    attempts++;
+    stopInput();
+    session?.stop();
+    session = null;
+    phase = { kind: 'reconnecting', attempt: attempts, reason };
+    retryTimer = setTimeout(connect, 1000 * 2 ** (attempts - 1)); // 1s, 2s, 4s
+    return true;
+  }
+
+  function reconnectNow() {
+    clearTimeout(retryTimer);
+    attempts = 0;
+    session?.stop();
+    session = null;
+    phase = { kind: 'connecting', stage: 'Reconnecting' };
+    connect();
+  }
+
   onMount(() => {
     const id = Number(appId);
     api.listApps(hostId).then(
@@ -126,21 +190,7 @@
       () => {},
     );
 
-    let cancelled = false;
-    StreamSession.start(hostId, id, settings, {
-      onMessage: onControl,
-      onMedia: attachMedia,
-      onDisconnected: (reason) => {
-        if (phase.kind !== 'ended') phase = { kind: 'error', message: reason };
-        stopInput();
-      },
-    }).then(
-      (s) => {
-        if (cancelled) s.stop();
-        else session = s;
-      },
-      (e) => (phase = { kind: 'error', message: (e as Error).message }),
-    );
+    connect();
 
     const statsTimer = setInterval(async () => {
       if (showStats && session) stats = await session.stats();
@@ -161,7 +211,8 @@
     document.addEventListener('pointerlockchange', onLock);
 
     return () => {
-      cancelled = true;
+      unmounted = true;
+      clearTimeout(retryTimer);
       stopInput();
       session?.stop();
       clearInterval(statsTimer);
@@ -244,13 +295,21 @@
         <div class="spinner"></div>
         <h2>Starting {appTitle ?? 'stream'}…</h2>
         <p>{phase.stage}</p>
+      {:else if phase.kind === 'reconnecting'}
+        <div class="spinner"></div>
+        <h2>Reconnecting… <span class="attempt">({phase.attempt}/{MAX_RETRIES})</span></h2>
+        <p>{phase.reason}</p>
+        <button class="btn" onclick={leave}><Icon name="arrow-left" size={15} /> Back to apps</button>
       {:else}
         <div class="state-icon" class:err={phase.kind === 'error'}>
           <Icon name={phase.kind === 'error' ? 'alert' : 'check'} size={26} />
         </div>
         <h2>{phase.kind === 'error' ? "Couldn't stream" : 'Stream ended'}</h2>
         {#if phase.message}<p>{phase.message}</p>{/if}
-        <button class="btn btn-primary" onclick={leave}><Icon name="arrow-left" size={15} /> Back to apps</button>
+        <div class="actions">
+          <button class="btn" onclick={leave}><Icon name="arrow-left" size={15} /> Back to apps</button>
+          <button class="btn btn-primary" onclick={reconnectNow}><Icon name="refresh" size={15} /> Reconnect</button>
+        </div>
       {/if}
     </div>
   {/if}
@@ -440,6 +499,14 @@
     margin: 0 0 8px;
     color: var(--muted);
     font-size: 14px;
+  }
+  .attempt {
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .actions {
+    display: flex;
+    gap: 8px;
   }
   .spinner {
     width: 40px;

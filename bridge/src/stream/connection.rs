@@ -63,7 +63,7 @@ pub struct ConnectionParams {
 pub enum ConnectError {
     #[error("another stream is already active on this bridge")]
     Busy,
-    #[error("connection failed at stage \"{stage}\" (error {code})")]
+    #[error("connection failed during {stage} (error {code}). {}", stage_hint(stage))]
     Failed { stage: String, code: i32 },
     #[error("invalid parameter: {0}")]
     Invalid(&'static str),
@@ -235,6 +235,24 @@ impl Drop for Connection {
 fn release() {
     *SINK.lock().unwrap() = None;
     ACTIVE.store(false, Ordering::Release);
+}
+
+/// What usually breaks at each stage (names from LiGetStageName).
+fn stage_hint(stage: &str) -> &'static str {
+    match stage {
+        "name resolution" => "Check the host's address.",
+        "RTSP handshake" => "The host must accept TCP port 48010 — check its firewall.",
+        "control stream initialization" | "control stream establishment" => {
+            "The host must accept UDP port 47999 — check its firewall."
+        }
+        "video stream initialization" | "video stream establishment" => {
+            "The host must accept UDP port 47998 — check its firewall."
+        }
+        "audio stream initialization" | "audio stream establishment" => {
+            "The host must accept UDP port 48000 — check its firewall."
+        }
+        _ => "Check that the host is reachable and Sunshine is running.",
+    }
 }
 
 static LAST_FAILED_STAGE: Mutex<Option<String>> = Mutex::new(None);
