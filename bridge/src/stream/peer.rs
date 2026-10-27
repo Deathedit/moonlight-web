@@ -11,7 +11,10 @@ use bytes::Bytes;
 use rtc::{
     interceptor::{Attribute, Interceptor, Packet, Slot, StreamInfo, TaggedPacket},
     media::Sample,
-    peer_connection::{configuration::media_engine::MIME_TYPE_OPUS, transport::RTCDtlsRole},
+    peer_connection::{
+        configuration::media_engine::MIME_TYPE_OPUS,
+        transport::RTCDtlsRole,
+    },
     rtcp::payload_feedbacks::{full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication},
     rtp_transceiver::rtp_sender::{
         RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
@@ -21,6 +24,7 @@ use rtc::{
 use tokio::sync::mpsc;
 
 use super::codec::OfferedCodec;
+use crate::config::WebRtcConfig;
 use webrtc::{
     data_channel::DataChannel,
     media_stream::{
@@ -139,8 +143,7 @@ impl Peer {
     pub async fn answer(
         offer_sdp: String,
         video: &OfferedCodec,
-        ice_servers: &[String],
-        udp_port: u16,
+        cfg: &WebRtcConfig,
     ) -> anyhow::Result<(Self, String, mpsc::UnboundedReceiver<PeerEvent>)> {
         let mut media = MediaEngine::default();
         media.register_codec(
@@ -152,10 +155,10 @@ impl Peer {
         let registry = register_default_interceptors(Registry::new(), &mut media)?
             .with(Slot::from(14_000), KeyframeRequestForwarder::default());
 
-        let ice = if ice_servers.is_empty() {
+        let ice = if cfg.ice_servers.is_empty() {
             vec![]
         } else {
-            vec![RTCIceServer { urls: ice_servers.to_vec(), ..Default::default() }]
+            vec![RTCIceServer { urls: cfg.ice_servers.clone(), ..Default::default() }]
         };
 
         let (gathered_tx, mut gathered_rx) = mpsc::channel(1);
@@ -171,7 +174,7 @@ impl Peer {
             .with_media_engine(media)
             .with_interceptor_registry(registry)
             .with_handler(Arc::new(Handler { gathered: gathered_tx, events: events_tx }))
-            .with_udp_addrs(vec![format!("0.0.0.0:{udp_port}")])
+            .with_udp_addrs(vec![format!("0.0.0.0:{}", cfg.udp_port)])
             .build()
             .await?;
         let pc: Arc<dyn PeerConnection> = Arc::new(pc);
@@ -194,11 +197,16 @@ impl Peer {
             if audio.is_none() {
                 tracing::warn!("browser didn't negotiate Opus audio; streaming video only");
             }
-            let sdp = pc
+            let mut sdp = pc
                 .local_description()
                 .await
                 .ok_or_else(|| anyhow::anyhow!("no local description"))?
                 .sdp;
+            if !cfg.host_ips.is_empty() {
+                // rtc 0.21 accepts SettingEngine nat_1to1_ips but never applies them, so
+                // swap the addresses in our (non-trickle) answer ourselves.
+                sdp = advertise_host_ips(&sdp, &cfg.host_ips);
+            }
             anyhow::Ok((video, audio, sdp))
         }
         .await;
@@ -246,6 +254,37 @@ impl Peer {
     }
 }
 
+/// Replace the addresses of our host candidates with `ips` (one candidate per IP and
+/// port), e.g. a Docker host's LAN address in place of the container's. ICE checks are
+/// authenticated by ufrag/password, so traffic forwarded to the container still matches.
+fn advertise_host_ips(sdp: &str, ips: &[String]) -> String {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in sdp.split("\r\n") {
+        let Some(rest) = line.strip_prefix("a=candidate:") else {
+            out.push(line.to_string());
+            continue;
+        };
+        // foundation component transport priority address port "typ" type ...
+        let fields: Vec<&str> = rest.split(' ').collect();
+        if fields.len() < 8 || fields[6] != "typ" || fields[7] != "host" {
+            out.push(line.to_string());
+            continue;
+        }
+        for ip in ips {
+            // Several interfaces yield several candidates on the same port: emit each
+            // advertised address once per component/transport/port.
+            if !seen.insert((fields[1].to_string(), fields[2].to_lowercase(), ip.clone(), fields[5].to_string())) {
+                continue;
+            }
+            let mut f = fields.clone();
+            f[4] = ip;
+            out.push(format!("a=candidate:{}", f.join(" ")));
+        }
+    }
+    out.join("\r\n")
+}
+
 fn random_u32() -> u32 {
     let mut b = [0u8; 4];
     openssl::rand::rand_bytes(&mut b).expect("rng");
@@ -259,6 +298,40 @@ fn is_keyframe_request(p: &dyn rtc::rtcp::Packet) -> bool {
 
 /// The default interceptor chain ends inbound RTCP before it reaches the application.
 /// This passes PLI/FIR through (tagged DeliverToApplication) so we can request IDR frames.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ANSWER: &str = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\n\
+a=candidate:1 1 udp 2130706431 172.18.0.5 8080 typ host\r\n\
+a=candidate:2 1 udp 2130706431 10.0.0.9 8080 typ host\r\n\
+a=candidate:3 1 udp 1694498815 198.51.100.1 40000 typ srflx raddr 0.0.0.0 rport 8080\r\n\
+a=end-of-candidates\r\n";
+
+    #[test]
+    fn rewrites_host_candidates() {
+        let out = advertise_host_ips(ANSWER, &["192.168.1.10".into()]);
+        let cands: Vec<_> = out.lines().filter(|l| l.starts_with("a=candidate:")).collect();
+        assert_eq!(
+            cands,
+            vec![
+                "a=candidate:1 1 udp 2130706431 192.168.1.10 8080 typ host",
+                // Non-host candidates are left alone.
+                "a=candidate:3 1 udp 1694498815 198.51.100.1 40000 typ srflx raddr 0.0.0.0 rport 8080",
+            ]
+        );
+        assert!(out.contains("a=end-of-candidates"));
+        assert!(!out.contains("172.18.0.5") && !out.contains("10.0.0.9"));
+    }
+
+    #[test]
+    fn one_candidate_per_advertised_ip() {
+        let out = advertise_host_ips(ANSWER, &["192.168.1.10".into(), "fd00::10".into()]);
+        assert_eq!(out.matches("typ host").count(), 2);
+        assert!(out.contains(" fd00::10 8080 typ host"));
+    }
+}
+
 #[derive(Default)]
 struct KeyframeRequestForwarder {
     read: VecDeque<TaggedPacket>,

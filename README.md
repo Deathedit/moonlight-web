@@ -54,6 +54,7 @@ direnv allow           # auto-enter via .envrc
 | `MLW_WEB_DIR`     | `web/dist`     | Built UI                                  |
 | `MLW_ICE_SERVERS` | _(none)_       | Comma-separated STUN/TURN URLs (non-LAN)  |
 | `MLW_WEBRTC_UDP_PORT` | `0` (random) | Fixed UDP port for WebRTC media (firewalls) |
+| `MLW_WEBRTC_HOST_IPS` | _(none)_ | IPs to advertise for WebRTC instead of the container's own (Docker bridge networks) |
 
 ## Self-hosting with Docker
 
@@ -74,6 +75,20 @@ docker compose up -d        # uses docker-compose.yml
 - **Use HTTPS when opening it from another machine.** Browsers only allow some features
   (gamepads, keyboard lock in fullscreen) in secure contexts — `https://` or `localhost`.
   Put it behind a reverse proxy with TLS (Caddy, Traefik, nginx); WebSocket support isn't needed.
+
+**Behind a reverse proxy on a Docker network** (e.g. Traefik's `proxy` network) instead of host
+networking: publish the WebRTC UDP port and set `MLW_WEBRTC_HOST_IPS` to the server's LAN IP, so
+the browser sends media there rather than to the unreachable container IP:
+
+```yaml
+    environment:
+      MLW_WEBRTC_UDP_PORT: "40080"
+      MLW_WEBRTC_HOST_IPS: 192.168.1.50   # the Docker server's LAN address
+    ports:
+      - "40080:40080/udp"
+```
+
+mDNS discovery doesn't work from a bridge network; add hosts by IP.
 
 Build the image yourself with `docker build -t moonlight-web .` from a `--recursive` clone.
 

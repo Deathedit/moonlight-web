@@ -9,11 +9,25 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Built web UI (`web/dist`).
     pub web_dir: PathBuf,
+    pub webrtc: WebRtcConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WebRtcConfig {
     /// Optional STUN/TURN servers for non-LAN use; empty = host candidates only.
     pub ice_servers: Vec<String>,
-    /// Fixed UDP port for WebRTC media (0 = random). Only one stream runs at a time,
-    /// so one port is enough; fixing it lets a firewall allow it.
-    pub webrtc_udp_port: u16,
+    /// Fixed UDP port for media (0 = random). Only one stream runs at a time, so one
+    /// port is enough; fixing it lets a firewall (or Docker port mapping) allow it.
+    pub udp_port: u16,
+    /// IPs to advertise to the browser instead of our interface addresses. Needed in a
+    /// Docker bridge network, where our own address is a container IP the browser can't reach.
+    pub host_ips: Vec<String>,
+}
+
+fn list_env(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
 }
 
 impl Config {
@@ -27,15 +41,17 @@ impl Config {
         let web_dir = std::env::var("MLW_WEB_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("web/dist"));
-        let ice_servers = std::env::var("MLW_ICE_SERVERS")
-            .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
-            .unwrap_or_default();
-
-        let webrtc_udp_port = match std::env::var("MLW_WEBRTC_UDP_PORT") {
+        let udp_port = match std::env::var("MLW_WEBRTC_UDP_PORT") {
             Ok(p) => p.parse().map_err(|_| anyhow::anyhow!("MLW_WEBRTC_UDP_PORT must be a port number"))?,
             Err(_) => 0,
         };
+        let host_ips = list_env("MLW_WEBRTC_HOST_IPS");
+        for ip in &host_ips {
+            ip.parse::<std::net::IpAddr>()
+                .map_err(|_| anyhow::anyhow!("MLW_WEBRTC_HOST_IPS: {ip:?} is not an IP address"))?;
+        }
 
-        Ok(Self { bind, data_dir, web_dir, ice_servers, webrtc_udp_port })
+        let webrtc = WebRtcConfig { ice_servers: list_env("MLW_ICE_SERVERS"), udp_port, host_ips };
+        Ok(Self { bind, data_dir, web_dir, webrtc })
     }
 }

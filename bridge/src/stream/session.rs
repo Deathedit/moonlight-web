@@ -17,6 +17,7 @@ use super::{
     peer::{Peer, PeerEvent},
 };
 use crate::{
+    config::WebRtcConfig,
     hosts::Host,
     nvhttp::{LaunchParams, NvClient},
 };
@@ -51,8 +52,7 @@ impl Streams {
         nv: NvClient,
         host: Host,
         server_cert: String,
-        ice_servers: &[String],
-        udp_port: u16,
+        webrtc: &WebRtcConfig,
         mut req: StreamRequest,
     ) -> anyhow::Result<(String, VideoCodec)> {
         let mut active = self.0.lock().await;
@@ -78,7 +78,7 @@ impl Streams {
         tracing::info!(codec = video.codec.label(), "negotiated video codec");
 
         let offer = std::mem::take(&mut req.offer_sdp);
-        let (peer, answer, peer_events) = Peer::answer(offer, &video, ice_servers, udp_port).await?;
+        let (peer, answer, peer_events) = Peer::answer(offer, &video, webrtc).await?;
         let stop = Arc::new(Notify::new());
         let done =
             tokio::spawn(run(nv, host, server_cert, req, video.codec, Arc::new(peer), peer_events, stop.clone()));

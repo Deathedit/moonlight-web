@@ -412,8 +412,7 @@ async fn start_stream(
             s.nv.clone(),
             host,
             cert,
-            &s.config.ice_servers,
-            s.config.webrtc_udp_port,
+            &s.config.webrtc,
             StreamRequest {
                 app_id: req.app_id,
                 codecs: req.codecs,
