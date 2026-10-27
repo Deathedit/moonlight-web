@@ -2,6 +2,13 @@
 
 Stream games from a [Sunshine](https://github.com/LizardByte/Sunshine) host in your browser.
 
+> **Disclaimer:** this is an independent, personal project built for my own setup. It is not
+> affiliated with, endorsed by, or supported by the [Moonlight](https://moonlight-stream.org)
+> team or the Sunshine/LizardByte project — please don't report issues with it to them.
+> It uses their open-source [`moonlight-common-c`](https://github.com/moonlight-stream/moonlight-common-c)
+> library (GPLv3), which is why this project is GPL-3.0-or-later too. Provided as-is, without
+> warranty; see the security notes under [Self-hosting](#self-hosting-with-docker).
+
 Browsers can't speak the GameStream protocol (raw UDP, RTSP, ENet, client-cert HTTPS), so a
 small Rust **bridge** acts as the Moonlight client (via `moonlight-common-c`) and re-serves the
 stream to the browser over **WebRTC**. The **web UI** is Svelte + Vite.
