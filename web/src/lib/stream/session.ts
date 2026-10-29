@@ -85,9 +85,7 @@ export class StreamSession {
     // video for lip sync; combine them locally for one <video> element.
     const media = new MediaStream();
     pc.ontrack = (e) => {
-      // Latency over smoothness: play frames as soon as they decode. In Chrome these only
-      // set a minimum; the bridge's playout-delay 0/0 RTP extension is what disables its
-      // own jitter buffering. These still help browsers without that extension.
+      // Latency over smoothness: play frames as soon as they decode.
       const receiver = e.receiver as RTCRtpReceiver & { jitterBufferTarget?: number; playoutDelayHint?: number };
       if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
       if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0;

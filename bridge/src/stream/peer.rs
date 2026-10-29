@@ -16,10 +16,8 @@ use rtc::{
         transport::RTCDtlsRole,
     },
     rtcp::payload_feedbacks::{full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication},
-    rtp::extension::{playout_delay_extension::PlayoutDelayExtension, HeaderExtension},
     rtp_transceiver::rtp_sender::{
-        RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
-        RTCRtpHeaderExtensionCapability, RtpCodecKind,
+        RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
     },
     sansio::Protocol,
 };
@@ -43,13 +41,6 @@ use webrtc::{
 /// How long to wait for our ICE candidates before answering anyway.
 const GATHER_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Playout delay min = max = 0 puts Chrome into its low-latency path: render each frame as
-/// soon as it decodes, ignoring RTP timing. Without it Chrome adds its own jitter estimate
-/// on top of `jitterBufferTarget`, and that estimate keeps growing on a desktop, where the
-/// host only sends frames when something changes. Browsers that don't offer it (Firefox)
-/// simply don't negotiate it.
-const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
-
 fn opus_codec() -> RTCRtpCodec {
     RTCRtpCodec {
         mime_type: MIME_TYPE_OPUS.to_owned(),
@@ -65,24 +56,15 @@ struct OutTrack {
     track: Arc<TrackLocalStaticSample>,
     ssrc: u32,
     pt: u8,
-    /// Added to every packet (skipped if the browser didn't negotiate them).
-    extensions: fn() -> Vec<HeaderExtension>,
 }
 
 impl OutTrack {
     /// `duration` is how far the RTP timestamp advances *after* this sample.
     async fn write(&self, data: Bytes, duration: Duration, at: Instant) -> anyhow::Result<()> {
         let sample = Sample { data, duration, ..Sample::new(at) };
-        let writer = (self.extensions)()
-            .into_iter()
-            .fold(self.track.sample_writer(self.ssrc, self.pt), |w, ext| w.with_extension(ext));
-        writer.write_sample(&sample).await?;
+        self.track.sample_writer(self.ssrc, self.pt).write_sample(&sample).await?;
         Ok(())
     }
-}
-
-fn video_extensions() -> Vec<HeaderExtension> {
-    vec![HeaderExtension::PlayoutDelay(PlayoutDelayExtension { min_delay: 0, max_delay: 0 })]
 }
 
 /// Create a track in its own media stream and add it to the connection. Audio and video
@@ -169,11 +151,6 @@ impl Peer {
             RtpCodecKind::Video,
         )?;
         media.register_codec(RTCRtpCodecParameters { rtp_codec: opus_codec(), payload_type: 111 }, RtpCodecKind::Audio)?;
-        media.register_header_extension(
-            RTCRtpHeaderExtensionCapability { uri: PLAYOUT_DELAY_URI.to_owned() },
-            RtpCodecKind::Video,
-            None,
-        )?;
         // Codecs must be registered before this: it attaches NACK/PLI feedback to them.
         let registry = register_default_interceptors(Registry::new(), &mut media)?
             .with(Slot::from(14_000), KeyframeRequestForwarder::default());
@@ -215,11 +192,8 @@ impl Peer {
             let video_pt = negotiated_pt(&video_sender)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("browser didn't accept {} video", video.codec.label()))?;
-            let video =
-                OutTrack { track: video_track, ssrc: video_ssrc, pt: video_pt, extensions: video_extensions };
-            let audio = negotiated_pt(&audio_sender)
-                .await
-                .map(|pt| OutTrack { track: audio, ssrc: audio_ssrc, pt, extensions: Vec::new });
+            let video = OutTrack { track: video_track, ssrc: video_ssrc, pt: video_pt };
+            let audio = negotiated_pt(&audio_sender).await.map(|pt| OutTrack { track: audio, ssrc: audio_ssrc, pt });
             if audio.is_none() {
                 tracing::warn!("browser didn't negotiate Opus audio; streaming video only");
             }
@@ -228,9 +202,6 @@ impl Peer {
                 .await
                 .ok_or_else(|| anyhow::anyhow!("no local description"))?
                 .sdp;
-            if !sdp.contains(PLAYOUT_DELAY_URI) {
-                tracing::info!("browser didn't negotiate playout-delay; it may buffer video for smoothness");
-            }
             if !cfg.host_ips.is_empty() {
                 // rtc 0.21 accepts SettingEngine nat_1to1_ips but never applies them, so
                 // swap the addresses in our (non-trickle) answer ourselves.
@@ -351,64 +322,6 @@ a=end-of-candidates\r\n";
         );
         assert!(out.contains("a=end-of-candidates"));
         assert!(!out.contains("172.18.0.5") && !out.contains("10.0.0.9"));
-    }
-
-    /// Trimmed-down Chrome offer: recvonly video + audio, data channels, bundled.
-    const CHROME_OFFER: &str = "v=0\r
-o=- 4611731400430051336 2 IN IP4 127.0.0.1\r
-s=-\r
-t=0 0\r
-a=group:BUNDLE 0 1 2\r
-a=msid-semantic: WMS\r
-m=video 9 UDP/TLS/RTP/SAVPF 102\r
-c=IN IP4 0.0.0.0\r
-a=rtcp:9 IN IP4 0.0.0.0\r
-a=ice-ufrag:abcd\r
-a=ice-pwd:abcdefghijklmnopqrstuvwx\r
-a=ice-options:trickle\r
-a=fingerprint:sha-256 6B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08\r
-a=setup:actpass\r
-a=mid:0\r
-a=extmap:6 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay\r
-a=recvonly\r
-a=rtcp-mux\r
-a=rtcp-rsize\r
-a=rtpmap:102 H264/90000\r
-a=rtcp-fb:102 nack\r
-a=rtcp-fb:102 nack pli\r
-a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r
-m=audio 9 UDP/TLS/RTP/SAVPF 111\r
-c=IN IP4 0.0.0.0\r
-a=rtcp:9 IN IP4 0.0.0.0\r
-a=ice-ufrag:abcd\r
-a=ice-pwd:abcdefghijklmnopqrstuvwx\r
-a=fingerprint:sha-256 6B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08\r
-a=setup:actpass\r
-a=mid:1\r
-a=recvonly\r
-a=rtcp-mux\r
-a=rtpmap:111 opus/48000/2\r
-a=fmtp:111 minptime=10;useinbandfec=1\r
-m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r
-c=IN IP4 0.0.0.0\r
-a=ice-ufrag:abcd\r
-a=ice-pwd:abcdefghijklmnopqrstuvwx\r
-a=fingerprint:sha-256 6B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08\r
-a=setup:actpass\r
-a=mid:2\r
-a=sctp-port:5000\r
-a=max-message-size:262144\r
-";
-
-    #[tokio::test]
-    async fn answer_negotiates_zero_playout_delay() {
-        let offered = crate::stream::codec::offered_video_codecs(CHROME_OFFER);
-        let (peer, answer, _events) = Peer::answer(CHROME_OFFER.into(), &offered[0], &WebRtcConfig::default())
-            .await
-            .expect("answer");
-        peer.close().await;
-        let video = answer.split("m=audio").next().unwrap();
-        assert!(video.contains(&format!(" {PLAYOUT_DELAY_URI}")), "{answer}");
     }
 
     #[test]
