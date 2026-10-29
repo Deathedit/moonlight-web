@@ -3,7 +3,7 @@
 
 use std::{
     collections::VecDeque,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -17,7 +17,8 @@ use rtc::{
     },
     rtcp::payload_feedbacks::{full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication},
     rtp_transceiver::rtp_sender::{
-        RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+        RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+        RTCRtpHeaderExtensionCapability, RtpCodecKind,
     },
     sansio::Protocol,
 };
@@ -40,6 +41,13 @@ use webrtc::{
 
 /// How long to wait for our ICE candidates before answering anyway.
 const GATHER_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Playout delay min = max = 0 puts Chrome into its low-latency path: render each frame as
+/// soon as it decodes, ignoring RTP timing. Without it Chrome adds its own jitter estimate
+/// on top of `jitterBufferTarget`, and that estimate keeps growing on a desktop, where the
+/// host only sends frames when something changes. Browsers that don't offer it (Firefox)
+/// simply don't negotiate it.
+const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 
 fn opus_codec() -> RTCRtpCodec {
     RTCRtpCodec {
@@ -151,9 +159,18 @@ impl Peer {
             RtpCodecKind::Video,
         )?;
         media.register_codec(RTCRtpCodecParameters { rtp_codec: opus_codec(), payload_type: 111 }, RtpCodecKind::Audio)?;
+        media.register_header_extension(
+            RTCRtpHeaderExtensionCapability { uri: PLAYOUT_DELAY_URI.to_owned() },
+            RtpCodecKind::Video,
+            None,
+        )?;
+        let playout_delay = Arc::new(OnceLock::new());
         // Codecs must be registered before this: it attaches NACK/PLI feedback to them.
+        // Writes walk the slots high to low, so the stamper runs before the NACK responder
+        // stores packets and retransmissions carry the extension too.
         let registry = register_default_interceptors(Registry::new(), &mut media)?
-            .with(Slot::from(14_000), KeyframeRequestForwarder::default());
+            .with(Slot::from(14_000), KeyframeRequestForwarder::default())
+            .with(Slot::from(14_500), PlayoutDelayStamper { target: Arc::clone(&playout_delay), ..Default::default() });
 
         let ice = if cfg.ice_servers.is_empty() {
             vec![]
@@ -202,6 +219,12 @@ impl Peer {
                 .await
                 .ok_or_else(|| anyhow::anyhow!("no local description"))?
                 .sdp;
+            match video_extension_id(&sdp, PLAYOUT_DELAY_URI) {
+                Some(id) => {
+                    let _ = playout_delay.set((video_ssrc, id));
+                }
+                None => tracing::info!("browser didn't negotiate playout-delay; it may buffer video for smoothness"),
+            }
             if !cfg.host_ips.is_empty() {
                 // rtc 0.21 accepts SettingEngine nat_1to1_ips but never applies them, so
                 // swap the addresses in our (non-trickle) answer ourselves.
@@ -301,6 +324,110 @@ fn is_keyframe_request(p: &dyn rtc::rtcp::Packet) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rtc::{
+        peer_connection::configuration::media_engine::MIME_TYPE_H264,
+        rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit},
+        sdp::extmap::{ABS_SEND_TIME_URI, TRANSPORT_CC_URI},
+    };
+    use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
+
+    #[test]
+    fn finds_video_extension_id() {
+        let sdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=extmap:3 urn:x\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 102\r\na=extmap:2 urn:y\r\na=extmap:7/sendonly urn:x\r\n";
+        assert_eq!(video_extension_id(sdp, "urn:x"), Some(7), "video section only, direction suffix ok");
+        assert_eq!(video_extension_id(sdp, "urn:z"), None);
+        assert_eq!(video_extension_id("m=video 9 x 1\r\na=extmap:15 urn:x\r\n", "urn:x"), None, "two-byte id");
+    }
+
+    /// Browser stand-in: forwards the video RTP it receives.
+    struct Browser {
+        gathered: mpsc::Sender<()>,
+        rtp: mpsc::UnboundedSender<rtc::rtp::Packet>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerConnectionEventHandler for Browser {
+        async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+            if state == RTCIceGatheringState::Complete {
+                let _ = self.gathered.try_send(());
+            }
+        }
+
+        async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+            let rtp = self.rtp.clone();
+            tokio::spawn(async move {
+                while let Some(ev) = track.poll().await {
+                    if let TrackRemoteEvent::OnRtpPacket(p) = ev {
+                        let _ = rtp.send(p);
+                    }
+                }
+            });
+        }
+    }
+
+    /// End to end over loopback: video packets must actually arrive, stamped with
+    /// playout-delay 0/0 under the id our answer gave it.
+    #[tokio::test]
+    async fn video_arrives_with_zero_playout_delay() {
+        let mut media = MediaEngine::default();
+        let h264 = RTCRtpCodec {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            clock_rate: 90_000,
+            channels: 0,
+            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_owned(),
+            rtcp_feedback: vec![],
+        };
+        media.register_codec(RTCRtpCodecParameters { rtp_codec: h264, payload_type: 102 }, RtpCodecKind::Video).unwrap();
+        media.register_codec(RTCRtpCodecParameters { rtp_codec: opus_codec(), payload_type: 111 }, RtpCodecKind::Audio).unwrap();
+        // Others first, so playout-delay's id differs from the one the bridge picks before
+        // negotiation (the mismatch that once dropped every packet).
+        for uri in [ABS_SEND_TIME_URI, TRANSPORT_CC_URI, "urn:3gpp:video-orientation", PLAYOUT_DELAY_URI] {
+            let cap = RTCRtpHeaderExtensionCapability { uri: uri.to_owned() };
+            media.register_header_extension(cap, RtpCodecKind::Video, None).unwrap();
+        }
+
+        let (gathered_tx, mut gathered_rx) = mpsc::channel(1);
+        let (rtp_tx, mut rtp_rx) = mpsc::unbounded_channel();
+        let browser = PeerConnectionBuilder::new()
+            .with_media_engine(media)
+            .with_handler(Arc::new(Browser { gathered: gathered_tx, rtp: rtp_tx }))
+            .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
+            .build()
+            .await
+            .unwrap();
+        for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
+            let init = RTCRtpTransceiverInit { direction: RTCRtpTransceiverDirection::Recvonly, ..Default::default() };
+            browser.add_transceiver_from_kind(kind, Some(init)).await.unwrap();
+        }
+        let offer = browser.create_offer(None).await.unwrap();
+        browser.set_local_description(offer).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), gathered_rx.recv()).await;
+        let offer = browser.local_description().await.unwrap().sdp;
+
+        let codec = crate::stream::codec::offered_video_codecs(&offer).into_iter().next().expect("H.264 offered");
+        let cfg = WebRtcConfig { host_ips: vec!["127.0.0.1".into()], ..Default::default() };
+        let (peer, answer, _events) = Peer::answer(offer, &codec, &cfg).await.unwrap();
+        let id = video_extension_id(&answer, PLAYOUT_DELAY_URI).expect("playout-delay negotiated");
+        browser.set_remote_description(RTCSessionDescription::answer(answer).unwrap()).await.unwrap();
+
+        // Keep sending until something arrives; ICE and DTLS take a moment.
+        let idr = Bytes::from_static(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x33, 0xff]);
+        let pkt = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let _ = peer.write_video(idr.clone(), Duration::from_millis(16), Instant::now()).await;
+                if let Ok(Some(p)) = tokio::time::timeout(Duration::from_millis(20), rtp_rx.recv()).await {
+                    break p;
+                }
+            }
+        })
+        .await
+        .expect("no video reached the browser");
+        peer.close().await;
+        let _ = browser.close().await;
+
+        assert_eq!(pkt.header.get_extension(id).as_deref(), Some(&[0u8, 0, 0][..]));
+    }
 
     const ANSWER: &str = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\n\
 a=candidate:1 1 udp 2130706431 172.18.0.5 8080 typ host\r\n\
@@ -373,6 +500,80 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for KeyframeRequestForwarder {
 }
 
 impl Interceptor for KeyframeRequestForwarder {
+    fn bind_local_stream(&mut self, _: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _: &StreamInfo) {}
+}
+
+/// The id `uri` got in the first video section of `sdp` (our answer: what the browser
+/// will parse). Only one-byte header ids (1–14), which is all we write.
+fn video_extension_id(sdp: &str, uri: &str) -> Option<u8> {
+    let mut in_video = false;
+    for line in sdp.lines().map(str::trim) {
+        if let Some(m) = line.strip_prefix("m=") {
+            if in_video {
+                break;
+            }
+            in_video = m.starts_with("video ");
+        } else if let Some(map) = line.strip_prefix("a=extmap:").filter(|_| in_video) {
+            // a=extmap:<id>[/<direction>] <uri> [<attributes>]
+            let mut parts = map.split_whitespace();
+            let id = parts.next()?.split('/').next()?.parse().ok()?;
+            if parts.next() == Some(uri) && (1..=14).contains(&id) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// Adds playout-delay 0/0 to outgoing video packets once the answer has fixed its id.
+///
+/// Not via the sample writer: webrtc 0.21 binds tracks before the offer is applied, so the
+/// writer would use a pre-negotiation id that the sender then rejects ("extension not
+/// found"), dropping every packet. Interceptors run after that check.
+#[derive(Default)]
+struct PlayoutDelayStamper {
+    /// (video SSRC, extension id), set after negotiation.
+    target: Arc<OnceLock<(u32, u8)>>,
+    read: VecDeque<TaggedPacket>,
+    write: VecDeque<TaggedPacket>,
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for PlayoutDelayStamper {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = rtc::shared::error::Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.read.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.read.pop_front()
+    }
+
+    fn handle_write(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let (Some(&(ssrc, id)), Packet::Rtp(pkt)) = (self.target.get(), &mut msg.message.packet) {
+            if pkt.header.ssrc == ssrc {
+                // min = max = 0: both 12-bit fields zero.
+                pkt.header.set_extension(id, Bytes::from_static(&[0, 0, 0]))?;
+            }
+        }
+        self.write.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.write.pop_front()
+    }
+}
+
+impl Interceptor for PlayoutDelayStamper {
     fn bind_local_stream(&mut self, _: &StreamInfo) {}
     fn unbind_local_stream(&mut self, _: &StreamInfo) {}
     fn bind_remote_stream(&mut self, _: &StreamInfo) {}
