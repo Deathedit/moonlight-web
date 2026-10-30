@@ -5,3 +5,4 @@ pub mod connection;
 pub mod input;
 pub mod peer;
 pub mod session;
+pub mod video_channel;

@@ -4,6 +4,13 @@ import type { MouseMode } from '../settings.svelte';
 import { toVirtualKey } from './keymap';
 import { encode, MODIFIER } from './protocol';
 
+/** What the stream is drawn on, and the size of the video in it. */
+export interface VideoView {
+  el: HTMLElement;
+  width: number;
+  height: number;
+}
+
 export interface InputChannels {
   /** Unordered, no retransmits: mouse motion (stale positions are worthless). */
   fast: RTCDataChannel;
@@ -62,7 +69,7 @@ export class InputCapture {
 
   constructor(
     private surface: HTMLElement,
-    private video: HTMLVideoElement,
+    private view: () => VideoView,
     private channels: InputChannels,
     private mode: MouseMode,
     private onShortcut: (s: Shortcut) => void,
@@ -202,10 +209,9 @@ export class InputCapture {
 
   /** Map the pointer into the video's content box (object-fit: contain letterboxes it). */
   private sendPosition(e: PointerEvent) {
-    const vw = this.video.videoWidth;
-    const vh = this.video.videoHeight;
+    const { el, width: vw, height: vh } = this.view();
     if (!vw || !vh) return;
-    const rect = this.video.getBoundingClientRect();
+    const rect = el.getBoundingClientRect();
     const scale = Math.min(rect.width / vw, rect.height / vh);
     const left = rect.left + (rect.width - vw * scale) / 2;
     const top = rect.top + (rect.height - vh * scale) / 2;

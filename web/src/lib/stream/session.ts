@@ -3,11 +3,23 @@
 // The browser is the offerer (recvonly video + audio, plus "control", "input" and
 // "input-reliable" data channels); the bridge answers non-trickle, so one HTTP round trip
 // sets everything up. Session progress and termination arrive as JSON on "control".
+//
+// With the WebCodecs renderer there is no video track: frames come over a "video" data
+// channel and are decoded and drawn by `WebCodecsRenderer`, bypassing the browser's
+// jitter buffer and frame scheduling.
 
 import { ApiError } from '../api';
 import { resolveStreamMode, type StreamSettings } from '../settings.svelte';
-import { applyCodecPreferences, probeCodecs, rankForAuto, type VideoCodec } from './codecs';
+import {
+  applyCodecPreferences,
+  probeCodecs,
+  probeWebCodecs,
+  rankForAuto,
+  webCodecsAvailable,
+  type VideoCodec,
+} from './codecs';
 import type { InputChannels } from './input';
+import { WebCodecsRenderer } from './webcodecs';
 
 export type ControlMessage =
   | { type: 'stage'; stage: string }
@@ -31,12 +43,13 @@ export interface StreamStats {
   fps: number;
   bitrateMbps: number;
   rttMs: number | null;
-  /** Average time frames spend in the jitter buffer. */
+  /** Average time frames spend in the jitter buffer (none with WebCodecs). */
   jitterBufferMs: number | null;
   decodeMs: number | null;
   packetsLost: number;
   framesDropped: number;
   codec: string;
+  renderer: 'WebRTC' | 'WebCodecs';
 }
 
 const ICE_GATHER_TIMEOUT_MS = 2000;
@@ -49,6 +62,9 @@ export class StreamSession {
     private handlers: SessionHandlers,
   ) {}
 
+  /** Set when video is decoded with WebCodecs; its canvas shows the stream. */
+  renderer: WebCodecsRenderer | null = null;
+
   static async start(
     hostId: string,
     appId: number,
@@ -56,13 +72,13 @@ export class StreamSession {
     handlers: SessionHandlers,
   ): Promise<StreamSession> {
     const mode = await resolveStreamMode(settings);
+    const webCodecs = settings.renderer === 'webcodecs' && webCodecsAvailable();
+    const probe = webCodecs ? probeWebCodecs : probeCodecs;
     const codecs: VideoCodec[] =
-      settings.codec === 'auto'
-        ? rankForAuto(await probeCodecs({ ...mode, bitrateKbps: settings.bitrateKbps }))
-        : [settings.codec];
+      settings.codec === 'auto' ? rankForAuto(await probe({ ...mode, bitrateKbps: settings.bitrateKbps })) : [settings.codec];
 
     const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
-    applyCodecPreferences(pc.addTransceiver('video', { direction: 'recvonly' }), codecs);
+    if (!webCodecs) applyCodecPreferences(pc.addTransceiver('video', { direction: 'recvonly' }), codecs);
     pc.addTransceiver('audio', { direction: 'recvonly' });
 
     const control = pc.createDataChannel('control', { ordered: true });
@@ -71,6 +87,8 @@ export class StreamSession {
       reliable: pc.createDataChannel('input-reliable', { ordered: true }),
     };
     input.fast.binaryType = input.reliable.binaryType = 'arraybuffer';
+    // Reliable and ordered: the decoder must see every frame, in order.
+    const video = webCodecs ? pc.createDataChannel('video', { ordered: true }) : null;
     const session = new StreamSession(pc, control, input, handlers);
 
     control.onmessage = (e) => {
@@ -111,6 +129,7 @@ export class StreamSession {
           ...mode,
           bitrateKbps: settings.bitrateKbps,
           codecs,
+          videoTransport: webCodecs ? 'datachannel' : 'track',
           sdp: pc.localDescription!.sdp,
         }),
       });
@@ -118,9 +137,16 @@ export class StreamSession {
         const body = await res.json().catch(() => null);
         throw new ApiError(res.status, body?.error ?? res.statusText);
       }
-      const { sdp } = await res.json();
+      const { sdp, codec } = (await res.json()) as { sdp: string; codec: VideoCodec };
+      if (video) {
+        session.renderer = new WebCodecsRenderer(video, codec, {
+          onKeyframeNeeded: () => control.readyState === 'open' && control.send(JSON.stringify({ type: 'idr' })),
+          onFatal: (error) => session.handlers.onMessage({ type: 'failed', error, retryable: false }),
+        });
+      }
       await pc.setRemoteDescription({ type: 'answer', sdp });
     } catch (e) {
+      session.renderer?.destroy();
       pc.close();
       throw e;
     }
@@ -131,11 +157,13 @@ export class StreamSession {
   stop() {
     this.handlers = { onMessage: () => {}, onDisconnected: () => {}, onMedia: () => {} };
     if (this.control.readyState === 'open') this.control.send(JSON.stringify({ type: 'stop' }));
+    this.renderer?.destroy();
     // Give the stop message a moment to flush before tearing down.
     setTimeout(() => this.pc.close(), 50);
   }
 
   private prev: { at: number; bytes: number; jbDelay: number; jbCount: number } | null = null;
+  private prevCounters: { at: number; frames: number; bytes: number; decodeMs: number } | null = null;
 
   async stats(): Promise<StreamStats | null> {
     const report = await this.pc.getStats();
@@ -147,6 +175,8 @@ export class StreamSession {
       if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') pair = s;
       if (s.type === 'codec') codecs.set(s.id, s);
     });
+    const rttMs = pair?.currentRoundTripTime != null ? pair.currentRoundTripTime * 1000 : null;
+    if (this.renderer) return this.webCodecsStats(rttMs);
     if (!inbound) return null;
 
     const now = inbound.timestamp as number;
@@ -170,12 +200,45 @@ export class StreamSession {
       height: inbound.frameHeight ?? 0,
       fps: inbound.framesPerSecond ?? 0,
       bitrateMbps,
-      rttMs: pair?.currentRoundTripTime != null ? pair.currentRoundTripTime * 1000 : null,
+      rttMs,
       jitterBufferMs,
       decodeMs: per(inbound.totalDecodeTime, inbound.framesDecoded),
       packetsLost: inbound.packetsLost ?? 0,
       framesDropped: inbound.framesDropped ?? 0,
       codec: codecs.get(inbound.codecId)?.mimeType?.replace('video/', '') ?? '?',
+      renderer: 'WebRTC',
+    };
+  }
+
+  private webCodecsStats(rttMs: number | null): StreamStats | null {
+    const c = this.renderer?.counters;
+    if (!c) return null;
+    const now = performance.now();
+    let fps = 0;
+    let bitrateMbps = 0;
+    let decodeMs: number | null = null;
+    // Report the last interval, like the WebRTC numbers.
+    const prev = this.prevCounters;
+    if (prev && now > prev.at) {
+      const secs = (now - prev.at) / 1000;
+      const frames = c.frames - prev.frames;
+      fps = frames / secs;
+      bitrateMbps = ((c.bytes - prev.bytes) * 8) / secs / 1e6;
+      if (frames > 0) decodeMs = (c.decodeMs - prev.decodeMs) / frames;
+    }
+    this.prevCounters = { at: now, frames: c.frames, bytes: c.bytes, decodeMs: c.decodeMs };
+    return {
+      width: c.width,
+      height: c.height,
+      fps,
+      bitrateMbps,
+      rttMs,
+      jitterBufferMs: null,
+      decodeMs,
+      packetsLost: 0,
+      framesDropped: c.dropped,
+      codec: c.codec,
+      renderer: 'WebCodecs',
     };
   }
 }

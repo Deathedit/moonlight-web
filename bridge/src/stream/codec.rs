@@ -148,6 +148,12 @@ pub fn choose(preference: &[VideoCodec], offered: &[OfferedCodec], host_scm: u32
     })
 }
 
+/// For WebCodecs, where the browser already filtered `preference` to what it decodes:
+/// the first codec the host can encode.
+pub fn choose_host_only(preference: &[VideoCodec], host_scm: u32) -> Option<VideoCodec> {
+    preference.iter().copied().find(|c| c.host_supports(host_scm))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +203,13 @@ a=rtpmap:111 opus/48000/2\r
         // Host without AV1/HEVC falls through to H.264.
         assert_eq!(pick(&[VideoCodec::Av1, VideoCodec::H265, VideoCodec::H264], 0x1), Some((VideoCodec::H264, 103)));
         assert_eq!(pick(&[VideoCodec::Av1], 0x1), None);
+    }
+
+    #[test]
+    fn chooses_for_webcodecs_by_host_support() {
+        assert_eq!(choose_host_only(&[VideoCodec::Av1, VideoCodec::H264], 0x1), Some(VideoCodec::H264));
+        assert_eq!(choose_host_only(&[VideoCodec::H265, VideoCodec::H264], SCM_ALL), Some(VideoCodec::H265));
+        assert_eq!(choose_host_only(&[VideoCodec::Av1], 0x1), None);
     }
 
     #[test]

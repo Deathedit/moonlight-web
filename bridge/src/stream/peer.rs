@@ -1,5 +1,6 @@
-//! WebRTC side of a stream (webrtc 0.21): one peer connection per session with an
-//! H.264 video track; the browser is the offerer and opens the data channels.
+//! WebRTC side of a stream (webrtc 0.21): one peer connection per session with a video
+//! track (unless the browser takes video over a data channel), an audio track, and the
+//! data channels the browser opens (it is the offerer).
 
 use std::{
     collections::VecDeque,
@@ -139,31 +140,34 @@ impl PeerConnectionEventHandler for Handler {
 
 pub struct Peer {
     pub pc: Arc<dyn PeerConnection>,
-    video: OutTrack,
+    /// None when video goes over the "video" data channel instead.
+    video: Option<OutTrack>,
     /// None if the browser didn't offer to receive audio.
     audio: Option<OutTrack>,
 }
 
 impl Peer {
     /// Answer the browser's offer with `video` (one of the codecs it offered, with its
-    /// exact payload type and fmtp, so negotiation can't mismatch). Returns the peer, its
-    /// answer SDP and the event stream.
+    /// exact payload type and fmtp, so negotiation can't mismatch), or with no video track
+    /// when `video` is None. Returns the peer, its answer SDP and the event stream.
     pub async fn answer(
         offer_sdp: String,
-        video: &OfferedCodec,
+        video: Option<&OfferedCodec>,
         cfg: &WebRtcConfig,
     ) -> anyhow::Result<(Self, String, mpsc::UnboundedReceiver<PeerEvent>)> {
         let mut media = MediaEngine::default();
-        media.register_codec(
-            RTCRtpCodecParameters { rtp_codec: video.rtp_codec(), payload_type: video.payload_type },
-            RtpCodecKind::Video,
-        )?;
+        if let Some(video) = video {
+            media.register_codec(
+                RTCRtpCodecParameters { rtp_codec: video.rtp_codec(), payload_type: video.payload_type },
+                RtpCodecKind::Video,
+            )?;
+            media.register_header_extension(
+                RTCRtpHeaderExtensionCapability { uri: PLAYOUT_DELAY_URI.to_owned() },
+                RtpCodecKind::Video,
+                None,
+            )?;
+        }
         media.register_codec(RTCRtpCodecParameters { rtp_codec: opus_codec(), payload_type: 111 }, RtpCodecKind::Audio)?;
-        media.register_header_extension(
-            RTCRtpHeaderExtensionCapability { uri: PLAYOUT_DELAY_URI.to_owned() },
-            RtpCodecKind::Video,
-            None,
-        )?;
         let playout_delay = Arc::new(OnceLock::new());
         // Codecs must be registered before this: it attaches NACK/PLI feedback to them.
         // Writes walk the slots high to low, so the stamper runs before the NACK responder
@@ -197,8 +201,10 @@ impl Peer {
         let pc: Arc<dyn PeerConnection> = Arc::new(pc);
 
         let result = async {
-            let (video_track, video_ssrc, video_sender) =
-                add_track(&pc, RtpCodecKind::Video, "video", video.rtp_codec()).await?;
+            let video_track = match video {
+                Some(video) => Some(add_track(&pc, RtpCodecKind::Video, "video", video.rtp_codec()).await?),
+                None => None,
+            };
             let (audio, audio_ssrc, audio_sender) = add_track(&pc, RtpCodecKind::Audio, "audio", opus_codec()).await?;
 
             pc.set_remote_description(RTCSessionDescription::offer(offer_sdp)?).await?;
@@ -206,10 +212,15 @@ impl Peer {
             pc.set_local_description(answer).await?;
             let _ = tokio::time::timeout(GATHER_TIMEOUT, gathered_rx.recv()).await;
 
-            let video_pt = negotiated_pt(&video_sender)
-                .await
-                .ok_or_else(|| anyhow::anyhow!("browser didn't accept {} video", video.codec.label()))?;
-            let video = OutTrack { track: video_track, ssrc: video_ssrc, pt: video_pt };
+            let video = match (video, video_track) {
+                (Some(video), Some((track, ssrc, sender))) => {
+                    let pt = negotiated_pt(&sender)
+                        .await
+                        .ok_or_else(|| anyhow::anyhow!("browser didn't accept {} video", video.codec.label()))?;
+                    Some(OutTrack { track, ssrc, pt })
+                }
+                _ => None,
+            };
             let audio = negotiated_pt(&audio_sender).await.map(|pt| OutTrack { track: audio, ssrc: audio_ssrc, pt });
             if audio.is_none() {
                 tracing::warn!("browser didn't negotiate Opus audio; streaming video only");
@@ -219,11 +230,13 @@ impl Peer {
                 .await
                 .ok_or_else(|| anyhow::anyhow!("no local description"))?
                 .sdp;
-            match video_extension_id(&sdp, PLAYOUT_DELAY_URI) {
-                Some(id) => {
-                    let _ = playout_delay.set((video_ssrc, id));
+            if let Some(video) = &video {
+                match video_extension_id(&sdp, PLAYOUT_DELAY_URI) {
+                    Some(id) => {
+                        let _ = playout_delay.set((video.ssrc, id));
+                    }
+                    None => tracing::info!("browser didn't negotiate playout-delay; it may buffer video for smoothness"),
                 }
-                None => tracing::info!("browser didn't negotiate playout-delay; it may buffer video for smoothness"),
             }
             if !cfg.host_ips.is_empty() {
                 // rtc 0.21 accepts SettingEngine nat_1to1_ips but never applies them, so
@@ -243,9 +256,13 @@ impl Peer {
         }
     }
 
-    /// Write one encoded frame. Applies back-pressure when the transport is behind.
+    /// Write one encoded frame to the video track (no-op without one). Applies
+    /// back-pressure when the transport is behind.
     pub async fn write_video(&self, data: Bytes, duration: Duration, at: Instant) -> anyhow::Result<()> {
-        self.video.write(data, duration, at).await
+        match &self.video {
+            Some(video) => video.write(data, duration, at).await,
+            None => Ok(()),
+        }
     }
 
     /// Write one Opus packet (no-op if audio wasn't negotiated).
@@ -258,7 +275,8 @@ impl Peer {
 
     /// Calls `on_request` whenever the browser asks for a keyframe (PLI/FIR).
     pub fn on_keyframe_request(&self, on_request: impl Fn() + Send + 'static) {
-        let track = Arc::clone(&self.video.track);
+        let Some(video) = &self.video else { return };
+        let track = Arc::clone(&video.track);
         tokio::spawn(async move {
             while let Some(event) = track.poll().await {
                 if let TrackLocalEvent::OnRtcpPacket(pkts) = event {
@@ -407,7 +425,7 @@ m=video 9 UDP/TLS/RTP/SAVPF 102\r\na=extmap:2 urn:y\r\na=extmap:7/sendonly urn:x
 
         let codec = crate::stream::codec::offered_video_codecs(&offer).into_iter().next().expect("H.264 offered");
         let cfg = WebRtcConfig { host_ips: vec!["127.0.0.1".into()], ..Default::default() };
-        let (peer, answer, _events) = Peer::answer(offer, &codec, &cfg).await.unwrap();
+        let (peer, answer, _events) = Peer::answer(offer, Some(&codec), &cfg).await.unwrap();
         let id = video_extension_id(&answer, PLAYOUT_DELAY_URI).expect("playout-delay negotiated");
         browser.set_remote_description(RTCSessionDescription::answer(answer).unwrap()).await.unwrap();
 

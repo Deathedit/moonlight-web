@@ -5,6 +5,11 @@ import type { VideoCodec } from './stream/codecs';
 /** "auto" picks the best codec this browser decodes in hardware and the host encodes. */
 export type Codec = 'auto' | VideoCodec;
 export type MouseMode = 'relative' | 'absolute';
+/**
+ * "webrtc": the browser's own WebRTC video pipeline. "webcodecs": we decode and draw each
+ * frame the moment it arrives (no jitter buffer or frame pacing); needs HTTPS or localhost.
+ */
+export type Renderer = 'webrtc' | 'webcodecs';
 
 export interface StreamSettings {
   /** Use this display's resolution instead of width/height. */
@@ -16,6 +21,7 @@ export interface StreamSettings {
   fps: number;
   bitrateKbps: number;
   codec: Codec;
+  renderer: Renderer;
   mouseMode: MouseMode;
   showStats: boolean;
 }
@@ -30,6 +36,7 @@ export const defaults: StreamSettings = {
   fps: 60,
   bitrateKbps: 20_000,
   codec: 'auto',
+  renderer: 'webrtc',
   mouseMode: 'relative',
   showStats: false,
 };

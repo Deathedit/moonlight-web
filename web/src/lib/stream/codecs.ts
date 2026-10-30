@@ -1,5 +1,8 @@
-// Which video codecs this browser can receive over WebRTC, and whether it decodes them in
-// hardware. Used to rank codecs for "Auto" and to annotate the Settings page.
+// Which video codecs this browser can receive over WebRTC (or decode with WebCodecs), and
+// whether it decodes them in hardware. Used to rank codecs for "Auto" and to annotate the
+// Settings page.
+
+import { GENERIC_CODEC_STRING } from './bitstream';
 
 export type VideoCodec = 'h264' | 'h265' | 'av1';
 
@@ -51,6 +54,39 @@ export async function probeCodecs(mode: Mode): Promise<CodecSupport[]> {
         }
       }
       return { codec, supported, hardware };
+    }),
+  );
+}
+
+/** WebCodecs decoding into a worker canvas (needs a secure context: HTTPS or localhost). */
+export function webCodecsAvailable(): boolean {
+  return (
+    typeof VideoDecoder !== 'undefined' &&
+    typeof OffscreenCanvas !== 'undefined' &&
+    'transferControlToOffscreen' in HTMLCanvasElement.prototype
+  );
+}
+
+/** Like `probeCodecs`, for decoding the stream ourselves with WebCodecs. */
+export async function probeWebCodecs(mode: Mode): Promise<CodecSupport[]> {
+  const available = webCodecsAvailable();
+  return Promise.all(
+    (Object.keys(MIME) as VideoCodec[]).map(async (codec) => {
+      if (!available) return { codec, supported: false, hardware: null };
+      const config = (hardwareAcceleration: HardwareAcceleration): VideoDecoderConfig => ({
+        codec: GENERIC_CODEC_STRING[codec],
+        codedWidth: mode.width,
+        codedHeight: mode.height,
+        optimizeForLatency: true,
+        hardwareAcceleration,
+      });
+      const ok = (c: VideoDecoderConfig) =>
+        VideoDecoder.isConfigSupported(c).then(
+          (r) => r.supported === true,
+          () => false,
+        );
+      const supported = await ok(config('no-preference'));
+      return { codec, supported, hardware: supported ? await ok(config('prefer-hardware')) : null };
     }),
   );
 }

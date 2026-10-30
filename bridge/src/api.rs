@@ -18,7 +18,7 @@ use crate::{
     pairing::{self, PairSession, PairSessions, PairState},
     stream::{
         codec::VideoCodec,
-        session::{StreamRequest, Streams},
+        session::{StreamRequest, Streams, VideoTransport},
     },
 };
 
@@ -369,6 +369,8 @@ struct StartStream {
     /// Video codecs the browser wants, best first; defaults to H.264 only.
     #[serde(default = "default_codecs")]
     codecs: Vec<VideoCodec>,
+    #[serde(default)]
+    video_transport: VideoTransport,
     /// The browser's WebRTC offer (non-trickle).
     sdp: String,
 }
@@ -416,6 +418,7 @@ async fn start_stream(
             StreamRequest {
                 app_id: req.app_id,
                 codecs: req.codecs,
+                video_transport: req.video_transport,
                 width: req.width,
                 height: req.height,
                 fps: req.fps,

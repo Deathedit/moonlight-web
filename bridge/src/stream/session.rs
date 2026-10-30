@@ -3,7 +3,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex, Notify};
 use webrtc::{
     data_channel::{DataChannel, DataChannelEvent},
@@ -15,6 +15,7 @@ use super::{
     connection::{AudioFrame, Connection, ConnectionParams, StreamEvent, VideoFrame, AUDIO_QUEUE, VIDEO_QUEUE},
     input,
     peer::{Peer, PeerEvent},
+    video_channel::{Sent, VideoChannel},
 };
 use crate::{
     config::WebRtcConfig,
@@ -25,10 +26,22 @@ use crate::{
 /// The browser must open its control channel within this time after the answer.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How video reaches the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoTransport {
+    /// An RTP video track, played by the browser's own WebRTC pipeline.
+    #[default]
+    Track,
+    /// The "video" data channel; the page decodes with WebCodecs (see `video_channel`).
+    DataChannel,
+}
+
 pub struct StreamRequest {
     pub app_id: u32,
     /// Browser's codec preference, best first.
     pub codecs: Vec<VideoCodec>,
+    pub video_transport: VideoTransport,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -65,7 +78,15 @@ impl Streams {
         // Pick the codec before answering: the answer can only carry one.
         let info = nv.server_info_https(&host.endpoint(), &server_cert).await?;
         let offered = codec::offered_video_codecs(&req.offer_sdp);
-        let video = codec::choose(&req.codecs, &offered, info.codec_mode_support).ok_or_else(|| {
+        let video = match req.video_transport {
+            VideoTransport::Track => {
+                codec::choose(&req.codecs, &offered, info.codec_mode_support).map(|o| (o.codec, Some(o)))
+            }
+            VideoTransport::DataChannel => {
+                codec::choose_host_only(&req.codecs, info.codec_mode_support).map(|c| (c, None))
+            }
+        };
+        let (video_codec, video_track) = video.ok_or_else(|| {
             let want: Vec<_> = req.codecs.iter().map(|c| c.label()).collect();
             anyhow::anyhow!(
                 "no common video codec: you asked for {}, but {} can't encode {} or this browser can't decode {}",
@@ -75,15 +96,15 @@ impl Streams {
                 if want.len() == 1 { "it" } else { "them" },
             )
         })?;
-        tracing::info!(codec = video.codec.label(), "negotiated video codec");
+        tracing::info!(codec = video_codec.label(), transport = ?req.video_transport, "negotiated video codec");
 
         let offer = std::mem::take(&mut req.offer_sdp);
-        let (peer, answer, peer_events) = Peer::answer(offer, &video, webrtc).await?;
+        let (peer, answer, peer_events) = Peer::answer(offer, video_track.as_ref(), webrtc).await?;
         let stop = Arc::new(Notify::new());
         let done =
-            tokio::spawn(run(nv, host, server_cert, req, video.codec, Arc::new(peer), peer_events, stop.clone()));
+            tokio::spawn(run(nv, host, server_cert, req, video_codec, Arc::new(peer), peer_events, stop.clone()));
         *active = Some(Active { stop, done });
-        Ok((answer, video.codec))
+        Ok((answer, video_codec))
     }
 }
 
@@ -118,15 +139,15 @@ async fn run(
     mut peer_events: mpsc::UnboundedReceiver<PeerEvent>,
     stop: Arc<Notify>,
 ) {
-    // 1. Wait for the browser's control channel. Input channels open alongside it; keep
-    //    them until the host connection is up.
-    let mut input_channels = Vec::new();
+    // 1. Wait for the browser's control channel. Input and video channels open alongside
+    //    it; keep them until the host connection is up.
+    let mut channels = Vec::new();
     let wait_for_control = tokio::time::timeout(CONTROL_TIMEOUT, async {
         while let Some(ev) = peer_events.recv().await {
             if let PeerEvent::DataChannel(dc) = ev {
                 match dc.label().await.as_deref() {
                     Ok("control") => return Some(dc),
-                    Ok(label) if label.starts_with("input") => input_channels.push(dc),
+                    Ok(label) if label.starts_with("input") || label == "video" => channels.push(dc),
                     Ok(label) => tracing::debug!(label, "ignoring unknown data channel"),
                     Err(_) => {}
                 }
@@ -145,17 +166,26 @@ async fn run(
         return;
     };
 
-    // Browser → bridge control messages. Currently only {"type":"stop"}.
+    // Browser → bridge control messages: {"type":"stop"}, and {"type":"idr"} when its own
+    // (WebCodecs) decoder needs a keyframe to recover.
     let browser_stop = Arc::new(Notify::new());
     tokio::spawn({
         let control = Arc::clone(&control);
         let browser_stop = Arc::clone(&browser_stop);
         async move {
+            #[derive(Deserialize)]
+            #[serde(tag = "type", rename_all = "lowercase")]
+            enum ControlIn {
+                Stop,
+                Idr,
+            }
             while let Some(ev) = control.poll().await {
                 match ev {
-                    DataChannelEvent::OnMessage(m) if m.is_string && m.data.as_ref() == br#"{"type":"stop"}"# => {
-                        browser_stop.notify_one();
-                    }
+                    DataChannelEvent::OnMessage(m) if m.is_string => match serde_json::from_slice(&m.data) {
+                        Ok(ControlIn::Stop) => browser_stop.notify_one(),
+                        Ok(ControlIn::Idr) => Connection::request_idr(),
+                        Err(_) => tracing::debug!("unknown control message"),
+                    },
                     DataChannelEvent::OnClose => break,
                     _ => {}
                 }
@@ -173,7 +203,7 @@ async fn run(
         video_codec,
         &peer,
         &mut peer_events,
-        input_channels,
+        channels,
         &control,
         &stop,
         &browser_stop,
@@ -215,7 +245,7 @@ async fn stream(
     video_codec: VideoCodec,
     peer: &Arc<Peer>,
     peer_events: &mut mpsc::UnboundedReceiver<PeerEvent>,
-    input_channels: Vec<Arc<dyn DataChannel>>,
+    channels: Vec<Arc<dyn DataChannel>>,
     control: &Arc<dyn DataChannel>,
     stop: &Notify,
     browser_stop: &Notify,
@@ -299,8 +329,15 @@ async fn stream(
             }
         }
     });
-    for dc in input_channels {
-        spawn_input_reader(dc);
+    // With VideoTransport::DataChannel, frames wait (dropped) until the browser's video
+    // channel is here; it normally opened together with the control channel.
+    let mut video_channel = None;
+    for dc in channels {
+        if dc.label().await.is_ok_and(|l| l == "video") {
+            video_channel = Some(VideoChannel::new(dc, req.bitrate_kbps));
+        } else {
+            spawn_input_reader(dc);
+        }
     }
 
     // 3. Pump frames until something ends the session.
@@ -322,6 +359,23 @@ async fn stream(
                     break End { reason: Some("The connection to the host closed."), retryable: true };
                 };
                 if waiting_for_idr && !frame.idr {
+                    continue;
+                }
+                if req.video_transport == VideoTransport::DataChannel {
+                    let Some(channel) = &video_channel else { continue };
+                    match channel.send(&frame.data, frame.idr).await {
+                        Ok(Sent::Ok) => waiting_for_idr = false,
+                        // The link is behind. Skip until it catches up and a keyframe
+                        // can restart decoding, rather than queueing seconds of video.
+                        Ok(Sent::Dropped) => {
+                            if !waiting_for_idr {
+                                tracing::debug!("video channel backlogged; dropping frames until the next IDR");
+                                waiting_for_idr = true;
+                            }
+                            Connection::request_idr();
+                        }
+                        Err(e) => tracing::debug!("video channel send failed: {e}"),
+                    }
                     continue;
                 }
                 waiting_for_idr = false;
@@ -347,9 +401,15 @@ async fn stream(
                     Connection::request_idr();
                 }
                 PeerEvent::State(RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) => break End::STOPPED,
-                PeerEvent::DataChannel(dc) if dc.label().await.is_ok_and(|l| l.starts_with("input")) => {
-                    spawn_input_reader(dc);
-                }
+                PeerEvent::DataChannel(dc) => match dc.label().await.as_deref() {
+                    Ok("video") => {
+                        video_channel = Some(VideoChannel::new(dc, req.bitrate_kbps));
+                        waiting_for_idr = true;
+                        Connection::request_idr();
+                    }
+                    Ok(label) if label.starts_with("input") => spawn_input_reader(dc),
+                    _ => {}
+                },
                 _ => {}
             },
             _ = browser_stop.notified() => break End::STOPPED,

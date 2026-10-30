@@ -7,7 +7,15 @@
     resetSettings,
     settings,
   } from '../lib/settings.svelte';
-  import { CODEC_LABELS, probeCodecs, rankForAuto, type CodecSupport, type VideoCodec } from '../lib/stream/codecs';
+  import {
+    CODEC_LABELS,
+    probeCodecs,
+    probeWebCodecs,
+    rankForAuto,
+    webCodecsAvailable,
+    type CodecSupport,
+    type VideoCodec,
+  } from '../lib/stream/codecs';
 
   const presets = [
     { label: '720p', w: 1280, h: 720 },
@@ -78,12 +86,16 @@
   const recommended = $derived(recommendedBitrateKbps(effective.width, effective.height, effective.fps));
   const mbps = (kbps: number) => (kbps / 1000).toFixed(kbps % 1000 === 0 ? 0 : 1);
 
-  // Decoder support depends on resolution/frame rate, so re-probe when they change.
+  const canWebCodecs = webCodecsAvailable();
+  const webCodecs = $derived(settings.renderer === 'webcodecs' && canWebCodecs);
+
+  // Decoder support depends on resolution/frame rate (and renderer), so re-probe when they change.
   let support = $state<CodecSupport[] | null>(null);
   $effect(() => {
     const mode = { ...effective, bitrateKbps: settings.bitrateKbps };
+    const probe = webCodecs ? probeWebCodecs : probeCodecs;
     let stale = false;
-    const t = setTimeout(() => probeCodecs(mode).then((s) => !stale && (support = s)), 150);
+    const t = setTimeout(() => probe(mode).then((s) => !stale && (support = s)), 150);
     return () => {
       stale = true;
       clearTimeout(t);
@@ -200,6 +212,29 @@
     </div>
 
     <div class="field">
+      <span class="label">Video renderer</span>
+      <div class="segmented">
+        <button class:active={!webCodecs} onclick={() => (settings.renderer = 'webrtc')}>Browser (WebRTC)</button>
+        <button
+          class:active={webCodecs}
+          disabled={!canWebCodecs}
+          onclick={() => (settings.renderer = 'webcodecs')}
+          title={canWebCodecs ? '' : 'Needs HTTPS (or localhost)'}>WebCodecs (lowest latency)</button
+        >
+      </div>
+      <p class="hint">
+        {#if !canWebCodecs}
+          WebCodecs needs this page to be served over HTTPS (or from localhost).
+        {:else if webCodecs}
+          Each frame is drawn the moment it decodes: no jitter buffer, no frame pacing. A network hiccup shows as a
+          stall rather than being smoothed over.
+        {:else}
+          The browser's own player. It may hold frames back briefly to smooth out network jitter.
+        {/if}
+      </p>
+    </div>
+
+    <div class="field">
       <label class="label" for="codec">Codec</label>
       <select id="codec" class="select" bind:value={settings.codec}>
         <option value="auto">Auto{autoPick ? ` — ${CODEC_LABELS[autoPick]}${describe(autoPick)}` : ''}</option>
@@ -290,6 +325,10 @@
   }
   .segmented button:hover {
     color: var(--text);
+  }
+  .segmented button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .segmented button.active {
     background: var(--accent);

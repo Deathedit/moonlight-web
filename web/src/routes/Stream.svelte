@@ -5,7 +5,7 @@
   import { router } from '../lib/router.svelte';
   import { settings } from '../lib/settings.svelte';
   import { GamepadForwarder } from '../lib/stream/gamepad';
-  import { InputCapture, type Shortcut } from '../lib/stream/input';
+  import { InputCapture, type Shortcut, type VideoView } from '../lib/stream/input';
   import { StreamSession, type ControlMessage, type StreamStats } from '../lib/stream/session';
 
   let { hostId, appId }: { hostId: string; appId: string } = $props();
@@ -31,7 +31,9 @@
 
   let root: HTMLDivElement;
   let surface: HTMLDivElement;
+  /** Plays audio, and video unless the WebCodecs renderer's canvas shows it. */
   let video: HTMLVideoElement;
+  let canvasHost: HTMLDivElement;
   let session: StreamSession | null = null;
   let input: InputCapture | null = null;
   let pads: GamepadForwarder | null = null;
@@ -73,10 +75,16 @@
 
   function startInput() {
     if (!session || input) return;
-    input = new InputCapture(surface, video, session.input, settings.mouseMode, onShortcut);
+    input = new InputCapture(surface, currentView, session.input, settings.mouseMode, onShortcut);
     pads = new GamepadForwarder(session.input.reliable);
     input.onLockError = (msg) => (lockError = msg);
     // Relative mode captures on the first click (browsers require a user gesture).
+  }
+
+  function currentView(): VideoView {
+    const r = session?.renderer;
+    if (r) return { el: r.canvas, width: r.width, height: r.height };
+    return { el: video, width: video.videoWidth, height: video.videoHeight };
   }
 
   function capture() {
@@ -151,6 +159,7 @@
         if (unmounted) return s.stop();
         current = s;
         session = s;
+        canvasHost.replaceChildren(...(s.renderer ? [s.renderer.canvas] : []));
       },
       (e) => {
         if (unmounted) return;
@@ -242,8 +251,11 @@
     role="application"
     aria-label="Game stream — input is sent to the host"
   >
-    <!-- svelte-ignore a11y_media_has_caption -->
-    <video bind:this={video} autoplay playsinline class:visible={phase.kind === 'streaming'}></video>
+    <div class="view" class:visible={phase.kind === 'streaming'}>
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video bind:this={video} autoplay playsinline></video>
+      <div class="canvas-host" bind:this={canvasHost}></div>
+    </div>
   </div>
 
   {#if phase.kind === 'streaming' && (poorConnection || soundBlocked || inputPaused)}
@@ -280,10 +292,11 @@
   {#if showStats && stats && phase.kind === 'streaming'}
     <dl class="stats">
       <dt>Video</dt><dd>{stats.width}×{stats.height} {stats.codec}</dd>
+      <dt>Renderer</dt><dd>{stats.renderer}</dd>
       <dt>FPS</dt><dd>{fmt(stats.fps)}</dd>
       <dt>Bitrate</dt><dd>{fmt(stats.bitrateMbps, 1)} Mbps</dd>
       <dt>RTT</dt><dd>{fmt(stats.rttMs)} ms</dd>
-      <dt>Jitter buffer</dt><dd>{fmt(stats.jitterBufferMs, 1)} ms</dd>
+      <dt>Jitter buffer</dt><dd>{stats.renderer === 'WebCodecs' ? 'none' : `${fmt(stats.jitterBufferMs, 1)} ms`}</dd>
       <dt>Decode</dt><dd>{fmt(stats.decodeMs, 1)} ms</dd>
       <dt>Lost / dropped</dt><dd>{stats.packetsLost} / {stats.framesDropped}</dd>
     </dl>
@@ -332,17 +345,22 @@
     cursor: none;
   }
 
-  video {
+  .view {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 300ms ease;
+  }
+  .view.visible {
+    opacity: 1;
+  }
+  video,
+  .canvas-host :global(canvas) {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;
-    opacity: 0;
-    transition: opacity 300ms ease;
-  }
-  video.visible {
-    opacity: 1;
   }
 
   .notices {
