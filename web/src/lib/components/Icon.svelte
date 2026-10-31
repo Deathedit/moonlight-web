@@ -10,6 +10,8 @@
     play: 'M6 4l14 8-14 8z',
     x: 'M18 6 6 18 M6 6l12 12',
     'arrow-left': 'M19 12H5 M12 19l-7-7 7-7',
+    'arrow-right': 'M5 12h14 M12 5l7 7-7 7',
+    volume: 'M11 5 6 9H3v6h3l5 4z M16 9a4 4 0 0 1 0 6',
     refresh: 'M21 12a9 9 0 1 1-3-6.7L21 8 M21 3v5h-5',
     'panel-left': 'M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 3v18',
     'chevrons-left': 'M11 17l-5-5 5-5 M18 17l-5-5 5-5',

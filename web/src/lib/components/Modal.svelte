@@ -5,9 +5,10 @@
   let {
     open = $bindable(false),
     title,
+    eyebrow,
     children,
     footer,
-  }: { open?: boolean; title: string; children: Snippet; footer?: Snippet } = $props();
+  }: { open?: boolean; title: string; eyebrow?: string; children: Snippet; footer?: Snippet } = $props();
 
   let dialog: HTMLDialogElement;
 
@@ -23,21 +24,22 @@
   onclose={() => (open = false)}
   onclick={(e) => e.target === dialog && (open = false)}
 >
-  <div class="panel">
-    <header>
+  <header>
+    <div>
+      {#if eyebrow}<div class="eyebrow">{eyebrow}</div>{/if}
       <h2>{title}</h2>
-      <button class="close" onclick={() => (open = false)} aria-label="Close"><Icon name="x" size={18} /></button>
-    </header>
-    <div class="body">{@render children()}</div>
-    {#if footer}<footer>{@render footer()}</footer>{/if}
-  </div>
+    </div>
+    <button class="btn btn-icon" onclick={() => (open = false)} aria-label="Close"><Icon name="x" size={18} /></button>
+  </header>
+  <div class="body">{@render children()}</div>
+  {#if footer}<footer>{@render footer()}</footer>{/if}
 </dialog>
 
 <style>
   dialog {
-    width: min(440px, calc(100vw - 32px));
+    width: min(520px, calc(100vw - 32px));
     padding: 0;
-    border: 1px solid var(--border-strong);
+    border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--surface);
     color: var(--text);
@@ -47,46 +49,39 @@
     animation: pop 160ms cubic-bezier(0.2, 0, 0, 1);
   }
   dialog::backdrop {
-    background: rgba(5, 9, 18, 0.65);
+    background: rgba(8, 9, 11, 0.75);
     backdrop-filter: blur(4px);
   }
   @keyframes pop {
     from {
       opacity: 0;
-      transform: translateY(8px) scale(0.98);
+      transform: translateY(8px);
     }
-  }
-  .panel {
-    padding: 24px;
   }
   header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
-    margin-bottom: 16px;
+    gap: 16px;
+    padding: 24px 20px 0 28px;
   }
   header h2 {
-    font-size: 17px;
+    margin-top: 4px;
+    font-size: 24px;
+    letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
   }
-  .close {
-    display: grid;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    border: 0;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
+  header .btn-icon {
+    margin-top: -4px;
   }
-  .close:hover {
-    background: var(--surface-2);
-    color: var(--text);
+  .body {
+    padding: 24px 28px 28px;
   }
   footer {
     display: flex;
     justify-content: flex-end;
-    gap: 8px;
-    margin-top: 24px;
+    gap: 10px;
+    padding: 16px 28px;
+    border-top: 1px solid var(--border);
   }
 </style>

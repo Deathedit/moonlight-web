@@ -3,6 +3,7 @@
   import { api, type Host, type PairState } from '../api';
   import Icon from './Icon.svelte';
   import Modal from './Modal.svelte';
+  import MoonPhase from './MoonPhase.svelte';
 
   let {
     host,
@@ -69,20 +70,20 @@
   const retry = () => attempt++;
 </script>
 
-<Modal bind:open title="Pair with {host?.name ?? 'host'}">
+<Modal bind:open eyebrow="Pairing" title={host?.name ?? 'host'}>
   {#if startError}
     <p class="error"><Icon name="alert" size={16} /> {startError}</p>
   {:else if !pair}
     <div class="pin skeleton" aria-busy="true"></div>
   {:else if pair.status === 'paired'}
     <div class="done">
-      <span class="done-icon"><Icon name="check" size={28} /></span>
-      <p>Paired successfully</p>
+      <MoonPhase phase="full" size={56} />
+      <p>Paired</p>
     </div>
   {:else}
-    <p class="lead">Enter this PIN in Sunshine on <b>{host?.name}</b>:</p>
+    <p class="lead">Enter this PIN in Sunshine on the host.</p>
     <div class="pin" class:failed={pair.status === 'failed'} aria-label="PIN {pair.pin.split('').join(' ')}">
-      {#each pair.pin.split('') as digit, i (i)}<span>{digit}</span>{/each}
+      {#each pair.pin.split('') as digit, i (i)}<span class="mono">{digit}</span>{/each}
     </div>
 
     {#if pair.status === 'failed'}
@@ -91,7 +92,10 @@
       <a class="sunshine-link" href={sunshineUrl} target="_blank" rel="noreferrer">
         Open Sunshine's PIN page <Icon name="external-link" size={14} />
       </a>
-      <div class="waiting"><span class="spinner"></span> Waiting for the PIN to be entered…</div>
+      <div class="waiting">
+        <div class="bar"><span></span></div>
+        <span class="mono">waiting for PIN…</span>
+      </div>
     {/if}
   {/if}
 
@@ -107,74 +111,72 @@
 
 <style>
   .lead {
-    margin: 0 0 16px;
+    margin: 0 0 20px;
     color: var(--muted);
-  }
-  .lead b {
-    color: var(--text);
   }
 
   .pin {
-    display: flex;
-    justify-content: center;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 10px;
-    margin-bottom: 20px;
   }
   .pin span {
     display: grid;
     place-items: center;
-    width: 64px;
-    height: 76px;
+    height: 96px;
+    border: 1px solid var(--border-strong);
     border-radius: var(--radius);
     background: var(--bg);
-    border: 1px solid var(--border-strong);
-    box-shadow:
-      inset 0 0 0 1px rgba(79, 140, 255, 0.15),
-      0 0 24px rgba(79, 140, 255, 0.12);
     color: var(--text);
-    font-size: 36px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
+    font-size: 48px;
+    font-weight: 500;
   }
   .pin.failed span {
-    color: var(--muted);
-    box-shadow: none;
+    color: var(--faint);
   }
   .pin.skeleton {
-    height: 76px;
-    border-radius: var(--radius);
-    background: var(--surface-2);
+    display: block;
+    height: 96px;
   }
 
   .sunshine-link {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    margin-top: 20px;
     font-size: 14px;
+    font-weight: 500;
   }
   .sunshine-link:hover {
     color: var(--accent-hover);
   }
 
   .waiting {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 14px;
+    margin-top: 24px;
     color: var(--muted);
-    font-size: 14px;
+    font-size: 12px;
   }
-  .spinner {
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    border: 2px solid var(--border-strong);
-    border-top-color: var(--accent);
-    animation: spin 0.8s linear infinite;
+  .bar {
+    position: relative;
+    height: 2px;
+    margin-bottom: 10px;
+    overflow: hidden;
+    border-radius: 1px;
+    background: var(--border);
   }
-  @keyframes spin {
+  .bar span {
+    position: absolute;
+    inset: 0;
+    width: 40%;
+    background: var(--accent);
+    animation: wax 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+  @keyframes wax {
+    from {
+      transform: translateX(-100%);
+    }
     to {
-      transform: rotate(360deg);
+      transform: translateX(250%);
     }
   }
 
@@ -182,29 +184,20 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 12px;
-    padding: 12px 0;
+    gap: 14px;
+    padding: 16px 0;
   }
   .done p {
     margin: 0;
+    font-size: 18px;
     font-weight: 600;
-  }
-  .done-icon {
-    display: grid;
-    place-items: center;
-    width: 60px;
-    height: 60px;
-    border-radius: 50%;
-    background: rgba(62, 207, 142, 0.12);
-    color: var(--success);
-    box-shadow: 0 0 24px rgba(62, 207, 142, 0.25);
   }
 
   .error {
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    margin: 0;
+    margin: 16px 0 0;
     color: var(--danger);
     font-size: 14px;
   }

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
   import Icon from '../lib/components/Icon.svelte';
+  import MoonPhase from '../lib/components/MoonPhase.svelte';
   import { router } from '../lib/router.svelte';
   import { settings } from '../lib/settings.svelte';
   import { GamepadForwarder } from '../lib/stream/gamepad';
@@ -18,6 +19,8 @@
     | { kind: 'ended'; message: string | null };
 
   let phase = $state<Phase>({ kind: 'connecting', stage: 'Contacting bridge' });
+  /** Stages already passed while connecting, shown as a checklist above the current one. */
+  let pastStages = $state<string[]>([]);
   let appTitle = $state<string | null>(null);
   let poorConnection = $state(false);
   let stats = $state<StreamStats | null>(null);
@@ -45,7 +48,10 @@
   function onControl(msg: ControlMessage) {
     switch (msg.type) {
       case 'stage':
-        if (phase.kind === 'connecting') phase = { kind: 'connecting', stage: msg.stage };
+        if (phase.kind === 'connecting' && msg.stage !== phase.stage) {
+          pastStages = [...pastStages, phase.stage];
+          phase = { kind: 'connecting', stage: msg.stage };
+        }
         break;
       case 'started':
         phase = { kind: 'streaming' };
@@ -188,6 +194,7 @@
     attempts = 0;
     session?.stop();
     session = null;
+    pastStages = [];
     phase = { kind: 'connecting', stage: 'Reconnecting' };
     connect();
   }
@@ -258,25 +265,48 @@
     </div>
   </div>
 
-  {#if phase.kind === 'streaming' && (poorConnection || soundBlocked || inputPaused)}
-    <div class="notices">
-      {#if inputPaused}
-        <button class="chip action" onclick={() => setInputPaused(false)} title="Ctrl+Alt+Shift+I">
-          Input paused — click or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> to resume
-        </button>
+  {#if phase.kind === 'streaming'}
+    <div class="top">
+      {#if showStats && stats}
+        <dl class="stats mono">
+          <div><dt>Video</dt><dd>{stats.codec} {stats.width}×{stats.height}</dd></div>
+          <div><dt>Renderer</dt><dd>{stats.renderer}</dd></div>
+          <div><dt>FPS</dt><dd class="accent">{fmt(stats.fps)}</dd></div>
+          <div><dt>Bitrate</dt><dd>{fmt(stats.bitrateMbps, 1)} Mbps</dd></div>
+          <div><dt>RTT</dt><dd>{fmt(stats.rttMs)} ms</dd></div>
+          <div><dt>Decode</dt><dd>{fmt(stats.decodeMs, 1)} ms</dd></div>
+          {#if stats.renderer !== 'WebCodecs'}
+            <div><dt>Jitter buf</dt><dd>{fmt(stats.jitterBufferMs, 1)} ms</dd></div>
+          {/if}
+          <div><dt>Lost / drop</dt><dd>{stats.packetsLost} / {stats.framesDropped}</dd></div>
+        </dl>
       {/if}
-      {#if poorConnection}<span class="chip warn"><Icon name="alert" size={13} /> Poor connection</span>{/if}
-      {#if soundBlocked}
-        <button class="chip action" onclick={enableSound} title="Your browser blocked autoplay with sound">
-          <Icon name="alert" size={13} /> Enable sound
-        </button>
+
+      {#if poorConnection || soundBlocked || inputPaused}
+        <div class="notices">
+          {#if inputPaused}
+            <button class="chip" onclick={() => setInputPaused(false)} title="Ctrl+Alt+Shift+I">
+              Input paused — click or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> to resume
+            </button>
+          {/if}
+          {#if poorConnection}<span class="chip warn"><Icon name="alert" size={14} /> Poor connection</span>{/if}
+          {#if soundBlocked}
+            <button class="chip" onclick={enableSound} title="Your browser blocked autoplay with sound">
+              <Icon name="volume" size={14} /> Enable sound
+            </button>
+          {/if}
+        </div>
       {/if}
     </div>
   {/if}
 
   {#if showHint && !needsCapture}
     <div class="hint" aria-live="polite">
-      <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd> + <kbd>Q</kbd> disconnect · <kbd>I</kbd> pause input · <kbd>X</kbd> fullscreen · <kbd>S</kbd> stats
+      <span><kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>Shift</kbd> +</span>
+      <span><kbd>Q</kbd> disconnect</span>
+      <span><kbd>I</kbd> pause input</span>
+      <span><kbd>X</kbd> fullscreen</span>
+      <span><kbd>S</kbd> stats</span>
     </div>
   {/if}
 
@@ -285,38 +315,46 @@
       <b>Click to control</b>
       {#if lockError}<span class="lock-err">{lockError}</span>{/if}
       <span><kbd>Esc</kbd> releases the mouse</span>
-      <span><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd> + <kbd>Q</kbd> disconnect · <kbd>I</kbd> pause input · <kbd>X</kbd> fullscreen · <kbd>S</kbd> stats</span>
+      <span>
+        <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>Shift</kbd> + <kbd>Q</kbd> disconnect · <kbd>I</kbd> pause input ·
+        <kbd>X</kbd> fullscreen · <kbd>S</kbd> stats
+      </span>
     </button>
-  {/if}
-
-  {#if showStats && stats && phase.kind === 'streaming'}
-    <dl class="stats">
-      <dt>Video</dt><dd>{stats.width}×{stats.height} {stats.codec}</dd>
-      <dt>Renderer</dt><dd>{stats.renderer}</dd>
-      <dt>FPS</dt><dd>{fmt(stats.fps)}</dd>
-      <dt>Bitrate</dt><dd>{fmt(stats.bitrateMbps, 1)} Mbps</dd>
-      <dt>RTT</dt><dd>{fmt(stats.rttMs)} ms</dd>
-      <dt>Jitter buffer</dt><dd>{stats.renderer === 'WebCodecs' ? 'none' : `${fmt(stats.jitterBufferMs, 1)} ms`}</dd>
-      <dt>Decode</dt><dd>{fmt(stats.decodeMs, 1)} ms</dd>
-      <dt>Lost / dropped</dt><dd>{stats.packetsLost} / {stats.framesDropped}</dd>
-    </dl>
   {/if}
 
   {#if phase.kind !== 'streaming'}
     <div class="center">
+      {#if phase.kind === 'connecting' || phase.kind === 'reconnecting'}
+        <svg class="loader" width="88" height="88" viewBox="0 0 44 44" role="img" aria-label="Connecting">
+          <defs><clipPath id="moon-disc"><circle cx="22" cy="22" r="20" /></clipPath></defs>
+          <circle class="lit" cx="22" cy="22" r="20" />
+          <g clip-path="url(#moon-disc)"><circle class="shade" cx="22" cy="22" r="20" /></g>
+          <circle class="rim" cx="22" cy="22" r="20" />
+        </svg>
+      {/if}
+
       {#if phase.kind === 'connecting'}
-        <div class="spinner"></div>
-        <h2>Starting {appTitle ?? 'stream'}…</h2>
-        <p>{phase.stage}</p>
+        <div class="eyebrow">Connecting</div>
+        <h2>Starting {appTitle ?? 'stream'}</h2>
+        <ol class="stages mono">
+          {#each pastStages as s, i (i)}
+            <li class="done"><MoonPhase phase="full" size={12} />{s}</li>
+          {/each}
+          <li class="current"><MoonPhase phase="half" size={12} />{phase.stage}</li>
+        </ol>
+        <button class="btn" onclick={leave}><Icon name="arrow-left" size={15} /> Cancel</button>
       {:else if phase.kind === 'reconnecting'}
-        <div class="spinner"></div>
-        <h2>Reconnecting… <span class="attempt">({phase.attempt}/{MAX_RETRIES})</span></h2>
+        <div class="eyebrow">Attempt {phase.attempt} of {MAX_RETRIES}</div>
+        <h2>Reconnecting</h2>
         <p>{phase.reason}</p>
         <button class="btn" onclick={leave}><Icon name="arrow-left" size={15} /> Back to apps</button>
       {:else}
-        <div class="state-icon" class:err={phase.kind === 'error'}>
-          <Icon name={phase.kind === 'error' ? 'alert' : 'check'} size={26} />
-        </div>
+        {#if phase.kind === 'error'}
+          <span class="state-icon err"><Icon name="alert" size={28} /></span>
+        {:else}
+          <MoonPhase phase="new" size={72} />
+        {/if}
+        <div class="eyebrow">{phase.kind === 'error' ? 'Error' : 'Session over'}</div>
         <h2>{phase.kind === 'error' ? "Couldn't stream" : 'Stream ended'}</h2>
         {#if phase.message}<p>{phase.message}</p>{/if}
         <div class="actions">
@@ -363,50 +401,104 @@
     object-fit: contain;
   }
 
-  .notices {
+  /* Overlays sit over the video: translucent ground, hairline border, mono values. */
+  .top {
     position: absolute;
-    top: 12px;
-    right: 12px;
+    top: 16px;
+    left: 50%;
     z-index: 2;
+    transform: translateX(-50%);
     display: flex;
-    gap: 6px;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    width: max-content;
+    max-width: calc(100vw - 24px);
+    pointer-events: none;
+  }
+  .stats {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin: 0;
+    overflow: hidden;
+    border: 1px solid rgba(236, 233, 225, 0.12);
+    border-radius: var(--radius);
+    background: rgba(13, 14, 17, 0.82);
+    backdrop-filter: blur(10px);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .stats div {
+    padding: 8px 14px;
+    border-right: 1px solid rgba(236, 233, 225, 0.1);
+  }
+  .stats div:last-child {
+    border-right: 0;
+  }
+  .stats dt {
+    color: var(--faint);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .stats dd {
+    margin: 0;
+  }
+  .stats .accent {
+    color: var(--accent);
+  }
+
+  .notices {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
   }
   .chip {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--accent-soft);
+    gap: 8px;
+    min-height: 36px;
+    padding: 0 14px;
+    border: 1px solid rgba(235, 217, 160, 0.4);
+    border-radius: 18px;
+    background: rgba(13, 14, 17, 0.85);
+    color: var(--text);
+    font: 500 13px var(--font);
+    pointer-events: auto;
+  }
+  .chip :global(svg) {
     color: var(--accent);
-    font-size: 12px;
-    font-weight: 500;
+  }
+  button.chip {
+    cursor: pointer;
   }
   .chip.warn {
-    background: rgba(245, 184, 74, 0.15);
+    border-color: rgba(235, 194, 122, 0.45);
     color: var(--warning);
   }
-  .chip.action {
-    border: 1px solid rgba(245, 184, 74, 0.4);
-    background: rgba(8, 14, 28, 0.8);
+  .chip.warn :global(svg) {
     color: var(--warning);
-    font-family: var(--font);
-    cursor: pointer;
   }
 
   .hint {
     position: absolute;
     left: 50%;
-    bottom: 32px;
+    bottom: 24px;
     z-index: 2;
     transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 14px;
     padding: 10px 16px;
+    border: 1px solid rgba(236, 233, 225, 0.12);
     border-radius: var(--radius);
-    background: rgba(8, 14, 28, 0.78);
-    border: 1px solid var(--border);
+    background: rgba(13, 14, 17, 0.82);
     backdrop-filter: blur(10px);
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     white-space: nowrap;
     pointer-events: none;
     animation: hint 5s ease forwards;
@@ -436,16 +528,18 @@
     flex-direction: column;
     align-items: center;
     gap: 6px;
-    padding: 14px 22px;
-    border: 1px solid rgba(79, 140, 255, 0.45);
-    border-radius: var(--radius);
-    background: rgba(8, 14, 28, 0.82);
+    padding: 16px 24px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-lg);
+    background: rgba(13, 14, 17, 0.88);
     backdrop-filter: blur(10px);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 24px var(--accent-glow);
     color: var(--text);
-    font: 14px var(--font);
+    font: 15px var(--font);
     cursor: pointer;
     animation: rise 200ms ease;
+  }
+  .capture b {
+    font-weight: 600;
   }
   .capture span {
     color: var(--muted);
@@ -455,45 +549,19 @@
     color: var(--warning);
   }
   kbd {
-    padding: 1px 5px;
+    padding: 1px 6px;
     border: 1px solid var(--border-strong);
     border-bottom-width: 2px;
     border-radius: 4px;
-    background: var(--surface-2);
+    background: var(--surface);
     color: var(--text);
-    font: 11px var(--font);
+    font-size: 11px;
   }
   @keyframes rise {
     from {
       opacity: 0;
       transform: translate(-50%, 8px);
     }
-  }
-
-  .stats {
-    position: absolute;
-    top: 12px;
-    left: 12px;
-    z-index: 2;
-    display: grid;
-    grid-template-columns: auto auto;
-    gap: 3px 14px;
-    margin: 0;
-    padding: 12px 14px;
-    border-radius: var(--radius-sm);
-    background: rgba(8, 14, 28, 0.78);
-    border: 1px solid var(--border);
-    backdrop-filter: blur(8px);
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    pointer-events: none;
-  }
-  .stats dt {
-    color: var(--muted);
-  }
-  .stats dd {
-    margin: 0;
-    text-align: right;
   }
 
   .center {
@@ -504,54 +572,87 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
     padding: 24px;
     text-align: center;
-    background: radial-gradient(60% 50% at 50% 45%, rgba(79, 140, 255, 0.12), transparent 70%);
+    background: var(--bg);
+  }
+  .center .eyebrow {
+    margin-top: 36px;
   }
   .center h2 {
-    font-size: 18px;
+    margin: 10px 0 0;
+    font-size: 40px;
+    letter-spacing: -0.03em;
   }
   .center p {
     max-width: 520px;
-    margin: 0 0 8px;
+    margin: 12px 0 0;
     color: var(--muted);
-    font-size: 14px;
   }
-  .attempt {
-    color: var(--muted);
-    font-weight: 500;
+  .center > .btn,
+  .actions {
+    margin-top: 40px;
   }
   .actions {
     display: flex;
-    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
   }
-  .spinner {
-    width: 40px;
-    height: 40px;
-    margin-bottom: 8px;
-    border-radius: 50%;
-    border: 3px solid var(--border-strong);
-    border-top-color: var(--accent);
-    animation: spin 0.8s linear infinite;
+
+  .loader .lit {
+    fill: var(--accent);
   }
-  @keyframes spin {
+  .loader .shade {
+    fill: var(--bg);
+    animation: phase 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
+  }
+  .loader .rim {
+    fill: none;
+    stroke: var(--border-strong);
+    stroke-width: 1;
+  }
+  @keyframes phase {
+    from {
+      transform: translateX(-22px);
+    }
     to {
-      transform: rotate(360deg);
+      transform: translateX(22px);
     }
   }
+
+  .stages {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 32px 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 13px;
+    text-align: left;
+  }
+  .stages li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .stages .done {
+    color: var(--muted);
+  }
+  .stages .done :global(svg) {
+    fill: var(--muted);
+  }
+  .stages .current {
+    color: var(--text);
+  }
+
   .state-icon {
     display: grid;
     place-items: center;
-    width: 56px;
-    height: 56px;
-    margin-bottom: 4px;
+    width: 72px;
+    height: 72px;
     border-radius: 50%;
-    background: var(--accent-soft);
-    color: var(--accent);
-  }
-  .state-icon.err {
-    background: rgba(255, 92, 122, 0.12);
+    border: 1px solid var(--danger-border);
     color: var(--danger);
   }
 </style>

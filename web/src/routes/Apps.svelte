@@ -1,7 +1,9 @@
 <script lang="ts">
   import { api, ApiError, type App, type Host } from '../lib/api';
+  import AppArt from '../lib/components/AppArt.svelte';
   import AppTile from '../lib/components/AppTile.svelte';
   import Icon from '../lib/components/Icon.svelte';
+  import MoonPhase from '../lib/components/MoonPhase.svelte';
   import Modal from '../lib/components/Modal.svelte';
   import { link, router } from '../lib/router.svelte';
 
@@ -85,16 +87,15 @@
 </script>
 
 <section class="page">
+  <a href="/" use:link class="back eyebrow"><Icon name="arrow-left" size={13} /> Hosts</a>
+
   <div class="page-header">
-    <div>
-      <a href="/" use:link class="back"><Icon name="arrow-left" size={14} /> Hosts</a>
-      <h1>{host?.name ?? 'Apps'}</h1>
-      {#if host}
-        <p>
-          {host.address}
-          {#if running}· <span class="live">Running {running.title}</span>{/if}
-        </p>
-      {/if}
+    <div class="title">
+      {#if host}<MoonPhase phase={running ? 'full' : 'half'} size={56} label={running ? 'In session' : 'Online'} />{/if}
+      <div>
+        <h1>{host?.name ?? 'Apps'}</h1>
+        {#if host}<div class="addr mono">{host.address} · {host.paired ? 'paired' : 'not paired'}</div>{/if}
+      </div>
     </div>
     <button class="btn" onclick={load} disabled={refreshing}>
       <span class:spin={refreshing}><Icon name="refresh" size={15} /></span> Refresh
@@ -112,7 +113,7 @@
     </div>
   {:else if apps === null}
     <div class="grid">
-      {#each [0, 1, 2, 3] as i (i)}<div class="skeleton"></div>{/each}
+      {#each [0, 1, 2, 3, 4, 5] as i (i)}<div class="skeleton poster-skel"></div>{/each}
     </div>
   {:else if apps.length === 0}
     <div class="card notice">
@@ -123,11 +124,37 @@
       </div>
     </div>
   {:else}
-    <div class="grid">
-      {#each apps as app (app.id)}
-        <AppTile {hostId} {app} onlaunch={launch} onquit={openQuit} />
-      {/each}
+    {#if running}
+      <section class="now card" aria-label="Now running">
+        <div class="now-art">
+          <AppArt {hostId} app={running} />
+        </div>
+        <div class="now-body">
+          <div>
+            <div class="eyebrow live"><MoonPhase phase="full" size={10} /> Now running</div>
+            <h2>{running.title}</h2>
+            <p>Pick up where you left off. Your current stream settings apply on resume.</p>
+          </div>
+          <div class="now-actions">
+            <button class="btn btn-primary" onclick={() => launch(running)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12-7.5z" /></svg>
+              Resume
+            </button>
+            <button class="btn btn-danger" onclick={() => openQuit(running)}><Icon name="x" size={14} /> Quit app</button>
+          </div>
+        </div>
+      </section>
+    {/if}
+
+    <div class="lib-head">
+      <h2 class="eyebrow">02 — Library</h2>
+      <span class="eyebrow count">{apps.length} {apps.length === 1 ? 'app' : 'apps'}</span>
     </div>
+    <ul class="grid">
+      {#each apps as app (app.id)}
+        <AppTile {hostId} {app} onlaunch={launch} />
+      {/each}
+    </ul>
   {/if}
 </section>
 
@@ -154,43 +181,108 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    margin-bottom: 8px;
+    margin-bottom: 16px;
     color: var(--muted);
-    font-size: 13px;
   }
   .back:hover {
     color: var(--text);
   }
+  .title {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    min-width: 0;
+  }
+  .title h1 {
+    margin-top: 0;
+    overflow-wrap: anywhere;
+  }
+  .addr {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .now {
+    display: flex;
+    flex-wrap: wrap;
+    overflow: hidden;
+    margin-bottom: 56px;
+  }
+  .now-art {
+    position: relative;
+    flex: 0 0 210px;
+    aspect-ratio: 3 / 4;
+    background: var(--surface-2);
+    border-right: 1px solid var(--border);
+  }
+  .now-body {
+    flex: 999 1 380px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 32px;
+  }
   .live {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     color: var(--accent);
+  }
+  .now h2 {
+    margin-top: 10px;
+    font-size: 36px;
+    line-height: 1.1;
+    letter-spacing: -0.025em;
+  }
+  .now p {
+    margin: 8px 0 0;
+    color: var(--muted);
+  }
+  .now-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .lib-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 14px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .count {
+    letter-spacing: 0.02em;
+    text-transform: none;
   }
 
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 28px 20px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
   }
   @media (max-width: 600px) {
     .grid {
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 20px 14px;
     }
+    /* The library below shows the same poster; skip the cropped copy on phones. */
+    .now-art {
+      display: none;
+    }
+    .now-body {
+      padding: 24px;
+    }
   }
-
-  .skeleton {
+  .poster-skel {
     aspect-ratio: 3 / 4;
-    border-radius: var(--radius);
-    background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%);
-    background-size: 300% 100%;
-    animation: shimmer 1.4s infinite linear;
-  }
-  @keyframes shimmer {
-    from {
-      background-position: 100% 0;
-    }
-    to {
-      background-position: -50% 0;
-    }
   }
 
   .notice {

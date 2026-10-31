@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type DiscoveredHost, type Host } from '../lib/api';
-  import HostCard from '../lib/components/HostCard.svelte';
+  import HostRow from '../lib/components/HostRow.svelte';
+  import MoonPhase from '../lib/components/MoonPhase.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import Modal from '../lib/components/Modal.svelte';
   import PairDialog from '../lib/components/PairDialog.svelte';
@@ -131,59 +132,66 @@
 <section class="page">
   <div class="page-header">
     <div>
-      <h1>Hosts</h1>
-      <p>Computers running Sunshine that you can stream from.</p>
+      <div class="eyebrow">01 — Hosts</div>
+      <h1>Your machines</h1>
+      <p>Computers running Sunshine that this bridge can stream from.</p>
     </div>
     <button class="btn btn-primary" onclick={openAdd}><Icon name="plus" size={16} /> Add host</button>
   </div>
 
   {#if loadError}
-    <div class="banner"><Icon name="alert" size={16} /> {loadError}</div>
+    <div class="notice-banner"><Icon name="alert" size={16} /> {loadError}</div>
+  {/if}
+
+  {#if hosts === null}
+    <div class="list-skeleton">
+      {#each [0, 1, 2] as i (i)}<div class="skeleton"></div>{/each}
+    </div>
+  {:else if hosts.length === 0}
+    <div class="empty">
+      <MoonPhase phase="new" size={56} />
+      <h2>No hosts yet</h2>
+      <p>
+        Add a PC running <a href="https://github.com/LizardByte/Sunshine" target="_blank" rel="noreferrer">Sunshine</a>
+        by its IP address or hostname{newFound.length > 0 ? ', or pick one found on your network below' : ''}.
+      </p>
+      <button class="btn btn-primary" onclick={openAdd}><Icon name="plus" size={16} /> Add your first host</button>
+    </div>
+  {:else}
+    <div class="legend eyebrow" aria-hidden="true">
+      <span><MoonPhase phase="full" size={12} />In session</span>
+      <span><MoonPhase phase="half" size={12} />Online</span>
+      <span><MoonPhase phase="crescent" size={12} />Not paired</span>
+      <span><MoonPhase phase="new" size={12} />Offline</span>
+    </div>
+    <ul class="list">
+      {#each hosts as host (host.id)}
+        <HostRow {host} onopen={openHost} onremove={askRemove} onunpair={askUnpair} />
+      {/each}
+    </ul>
   {/if}
 
   {#if newFound.length > 0}
-    <div class="found">
-      <h2>Found on your network</h2>
+    <section class="found">
+      <h2 class="eyebrow">Found on your network · mDNS</h2>
       <div class="found-list">
         {#each newFound as d (d.address)}
-          <div class="found-item card">
-            <span class="found-icon"><Icon name="monitor" size={18} /></span>
+          <div class="found-item">
+            <svg class="found-icon" width="28" height="28" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9.5" /><circle class="core" cx="12" cy="12" r="2.5" />
+            </svg>
             <div class="found-meta">
               <b>{d.name}</b>
-              <span>{d.address}</span>
+              <span class="mono">{d.address}</span>
             </div>
-            <button class="btn btn-primary" onclick={() => addFound(d)} disabled={addingFound !== null}>
+            <button class="btn strong" onclick={() => addFound(d)} disabled={addingFound !== null}>
               {addingFound === d.address ? 'Adding…' : 'Add & pair'}
             </button>
           </div>
         {/each}
       </div>
-    </div>
-  {/if}
-
-  {#if hosts === null}
-    <div class="grid">
-      {#each [0, 1, 2] as i (i)}<div class="card skeleton"></div>{/each}
-    </div>
-  {:else if hosts.length === 0}
-    <div class="empty card">
-      <div class="empty-icon"><Icon name="monitor" size={28} /></div>
-      <h2>No hosts yet</h2>
-      <p>
-        Add a PC running <a href="https://github.com/LizardByte/Sunshine" target="_blank" rel="noreferrer">Sunshine</a>
-        by its IP address or hostname.
-      </p>
-      <button class="btn btn-primary" onclick={openAdd}><Icon name="plus" size={16} /> Add your first host</button>
-    </div>
-  {:else}
-    <div class="grid">
-      {#each hosts as host (host.id)}
-        <HostCard {host} onopen={openHost} onremove={askRemove} onunpair={askUnpair} />
-      {/each}
-    </div>
-  {/if}
-
-  {#if discovered !== null && discovered.length === 0}
+    </section>
+  {:else if discovered !== null && discovered.length === 0}
     <p class="discover-hint">
       PCs running Sunshine are found automatically via mDNS. If yours doesn't show up, allow mDNS (UDP port 5353)
       through the firewall on the machine running this bridge, or add it by address.
@@ -197,7 +205,7 @@
     <!-- svelte-ignore a11y_autofocus -->
     <input
       id="address"
-      class="input"
+      class="input mono"
       placeholder="192.168.1.85"
       bind:value={address}
       autocomplete="off"
@@ -240,38 +248,33 @@
 </Modal>
 
 <style>
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 20px;
-  }
-
-  .skeleton {
-    aspect-ratio: 16 / 13;
-    background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%);
-    background-size: 300% 100%;
-    animation: shimmer 1.4s infinite linear;
-  }
-  @keyframes shimmer {
-    from {
-      background-position: 100% 0;
-    }
-    to {
-      background-position: -50% 0;
-    }
-  }
-
-  .banner {
+  .legend {
     display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+  }
+  .legend span {
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 20px;
-    padding: 10px 14px;
-    border-radius: var(--radius-sm);
-    border: 1px solid rgba(255, 92, 122, 0.35);
-    background: rgba(255, 92, 122, 0.08);
-    color: var(--danger);
-    font-size: 14px;
+    gap: 6px;
+  }
+  .list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .list-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .list-skeleton .skeleton {
+    height: 104px;
   }
 
   .empty {
@@ -279,51 +282,39 @@
     flex-direction: column;
     align-items: center;
     text-align: center;
-    padding: 56px 24px;
-    border-style: dashed;
-  }
-  .empty-icon {
-    display: grid;
-    place-items: center;
-    width: 64px;
-    height: 64px;
-    margin-bottom: 16px;
-    border-radius: 18px;
-    background: var(--accent-soft);
-    color: var(--accent);
-    box-shadow: inset 0 0 0 1px rgba(79, 140, 255, 0.25);
+    padding: 64px 24px;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-lg);
   }
   .empty h2 {
-    font-size: 18px;
+    margin-top: 20px;
+    font-size: 22px;
   }
   .empty p {
     max-width: 440px;
-    margin: 8px 0 20px;
+    margin: 8px 0 24px;
     color: var(--muted);
   }
 
   .found {
-    margin-bottom: 28px;
+    margin-top: 56px;
   }
   .found h2 {
-    margin-bottom: 12px;
-    color: var(--muted);
-    font-size: 13px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    margin-bottom: 16px;
   }
   .found-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    display: flex;
+    flex-direction: column;
     gap: 12px;
   }
   .found-item {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 14px;
-    padding: 12px 14px;
-    border-color: rgba(79, 140, 255, 0.35);
+    gap: 16px;
+    padding: 18px 20px;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
     animation: found-in 250ms ease;
   }
   @keyframes found-in {
@@ -333,16 +324,18 @@
     }
   }
   .found-icon {
-    display: grid;
-    place-items: center;
-    width: 40px;
-    height: 40px;
-    border-radius: 12px;
-    background: var(--accent-soft);
-    color: var(--accent);
+    flex: none;
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 1.5;
+    stroke-dasharray: 2.5 2.5;
+  }
+  .found-icon .core {
+    fill: var(--muted);
+    stroke: none;
   }
   .found-meta {
-    flex: 1;
+    flex: 999 1 200px;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -354,11 +347,15 @@
     text-overflow: ellipsis;
   }
   .found-meta span {
-    color: var(--faint);
+    color: var(--muted);
     font-size: 13px;
   }
+  .strong {
+    border-color: var(--border-strong);
+  }
   .discover-hint {
-    margin: 28px 0 0;
+    max-width: 640px;
+    margin: 40px 0 0;
     color: var(--faint);
     font-size: 13px;
   }

@@ -1,39 +1,37 @@
-/* Moonlight Web — dark-blue design tokens + base styles. */
+/* Moonlight Web — "Lunar Instrument" design tokens + base styles.
+   Warm near-black ground, one moon-gold accent for primary actions and live state,
+   Geist for UI and Geist Mono for every technical value. */
 :root {
   color-scheme: dark;
 
-  --bg: #0b1220;
-  --bg-grad: radial-gradient(1200px 600px at 10% -10%, #14234a 0%, transparent 60%),
-    radial-gradient(900px 500px at 110% 10%, #10213f 0%, transparent 55%), #0b1220;
-  --surface: #111a2e;
-  --surface-2: #17223b;
-  --surface-3: #1d2a48;
-  --border: #22304f;
-  --border-strong: #2e3f66;
+  --bg: #0d0e11;
+  --surface: #15171b;
+  --surface-2: #1c1f24;
+  --border: #2a2d33;
+  --border-strong: #3a3e46;
 
-  --text: #e6ecf7;
-  --muted: #8b9bbd;
-  --faint: #5d6c8f;
+  --text: #ece9e1;
+  --muted: #a19e95;
+  --faint: #858279;
+  --dim: #5a5852;
 
-  --accent: #4f8cff;
-  --accent-hover: #6aa0ff;
-  --accent-glow: rgba(79, 140, 255, 0.35);
-  --accent-soft: rgba(79, 140, 255, 0.12);
+  --accent: #ebd9a0;
+  --accent-hover: #f3e5b8;
+  --on-accent: #0d0e11;
 
-  --success: #3ecf8e;
-  --danger: #ff5c7a;
-  --warning: #f5b84a;
+  --success: #9fd8b0;
+  --danger: #f2a493;
+  --danger-border: #4a3a36;
+  --warning: #ebc27a;
 
-  --radius-sm: 8px;
-  --radius: 12px;
-  --radius-lg: 16px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(3, 8, 20, 0.45);
-  --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(3, 8, 20, 0.6), 0 0 0 1px var(--accent-glow);
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
   --ease: 150ms cubic-bezier(0.2, 0, 0, 1);
 
-  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --sidebar-w: 232px;
-  --sidebar-w-collapsed: 68px;
+  --font: 'Geist', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --topbar-h: 64px;
 }
 
 *,
@@ -49,8 +47,7 @@ body {
 }
 
 body {
-  background: var(--bg-grad);
-  background-attachment: fixed;
+  background: var(--bg);
   color: var(--text);
   font-family: var(--font);
   font-size: 15px;
@@ -63,12 +60,17 @@ h2,
 h3 {
   margin: 0;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
 }
 
 a {
   color: var(--accent);
   text-decoration: none;
+}
+
+code,
+kbd {
+  font-family: var(--mono);
 }
 
 :focus-visible {
@@ -77,22 +79,38 @@ a {
 }
 
 /* ---- Shared primitives ---- */
+.mono {
+  font-family: var(--mono);
+}
+
+/* Small uppercase mono label: section eyebrows, legends, field captions. */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  height: 38px;
+  height: 44px;
   padding: 0 16px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: transparent;
   color: var(--text);
   font: 500 14px var(--font);
+  white-space: nowrap;
   cursor: pointer;
-  transition: background var(--ease), border-color var(--ease), box-shadow var(--ease), transform var(--ease);
+  transition: background var(--ease), border-color var(--ease), color var(--ease);
 }
 .btn:hover {
-  background: var(--surface-3);
+  background: var(--surface-2);
   border-color: var(--border-strong);
 }
 .btn:active {
@@ -105,27 +123,40 @@ a {
 .btn-primary {
   background: var(--accent);
   border-color: transparent;
-  color: #fff;
-  box-shadow: 0 4px 16px var(--accent-glow);
+  color: var(--on-accent);
+  font-weight: 600;
 }
 .btn-primary:hover {
   background: var(--accent-hover);
   border-color: transparent;
 }
 .btn-danger {
+  border-color: var(--danger-border);
   color: var(--danger);
+}
+.btn-danger:hover {
+  border-color: var(--danger);
+}
+.btn-icon {
+  width: 44px;
+  padding: 0;
+  border-color: transparent;
+  color: var(--muted);
+}
+.btn-icon:hover {
+  color: var(--text);
+  border-color: transparent;
 }
 
 .card {
-  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
 }
 
 .input,
 .select {
-  height: 40px;
+  height: 44px;
   width: 100%;
   padding: 0 12px;
   border-radius: var(--radius-sm);
@@ -133,31 +164,30 @@ a {
   background: var(--bg);
   color: var(--text);
   font: 14px var(--font);
-  transition: border-color var(--ease), box-shadow var(--ease);
+  transition: border-color var(--ease);
 }
 .input:focus,
 .select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .label {
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
   color: var(--muted);
   font-size: 13px;
   font-weight: 500;
 }
 
 .page {
-  max-width: 1200px;
+  max-width: 1120px;
   margin: 0 auto;
-  padding: 32px 24px 64px;
+  padding: 56px 32px 80px;
 }
 @media (max-width: 600px) {
   .page {
-    padding: 20px 16px 48px;
+    padding: 32px 16px 56px;
   }
 }
 
@@ -165,11 +195,49 @@ a {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: 24px;
+  margin-bottom: 40px;
   flex-wrap: wrap;
 }
+.page-header h1 {
+  margin-top: 12px;
+  font-size: 56px;
+  line-height: 1;
+  letter-spacing: -0.035em;
+}
 .page-header p {
-  margin: 4px 0 0;
+  margin: 14px 0 0;
   color: var(--muted);
+}
+@media (max-width: 600px) {
+  .page-header h1 {
+    font-size: 40px;
+  }
+}
+
+.notice-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 24px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+  font-size: 14px;
+}
+
+.skeleton {
+  border-radius: var(--radius);
+  background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%);
+  background-size: 300% 100%;
+  animation: shimmer 1.4s infinite linear;
+}
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
 }
